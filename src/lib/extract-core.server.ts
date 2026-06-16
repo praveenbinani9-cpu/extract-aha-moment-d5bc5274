@@ -80,9 +80,7 @@ export type ExtractCoreResult = {
   json: string;            // pretty-printed JSON string (for UI display)
   parsed: unknown;         // parsed JSON object (for DB storage)
 };
-
-export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreResult> {
-   function detectMimeType(b64: string): string {
+function detectMimeType(b64: string): string {
   try {
     const head = atob(b64.slice(0, 16));
 
