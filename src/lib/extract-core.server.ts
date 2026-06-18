@@ -11,10 +11,10 @@ GST Invoice, Tax Invoice, E-Way Bill, Delivery Challan, Purchase Order, Credit N
 3. TRANSCRIBE values character-by-character. Do not paraphrase, normalize casing, or "correct" what the document says. Preserve original spelling, punctuation, and currency symbols inside string values.
 4. STRUCTURE table rows individually — never merge two line items, never split one. Match columns to headers by position.
 5. VALIDATE:
-   - GSTIN must match ^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$ (15 chars). Lower confidence if it doesn't.
-   - HSN/SAC: 4-8 digits.
-   - PAN inside GSTIN (chars 3-12) must look valid.
-   - Tax math: subtotal + cgst + sgst + igst ≈ grand_total (±1 for rounding). Flag mismatch by lowering "totals" field confidence.
+   - GSTIN must be exactly 15 characters and match ^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$. Count the characters. If it fails, mark gstin_seller_valid/gstin_buyer_valid = false, set per_field_confidence.seller_gstin (or buyer_gstin) ≤ 0.60, and add warning "GSTIN seller format invalid — verify manually" (or buyer).
+   - SELLER GSTIN is read ONLY from the header / letterhead area. BUYER GSTIN is read ONLY from the "Bill To" / "Buyer" section. Never mix them. Return null rather than a hallucinated value.
+   - If the seller GSTIN's 2-digit state code does not match the state shown in the seller address, add warning "Seller GSTIN state code {XX} does not match seller address state".
+   - HSN/SAC: 4-8 digits. PAN inside GSTIN (chars 3-12) must look valid.
    - Dates: convert to ISO YYYY-MM-DD. Treat DD/MM/YYYY as Indian convention unless context proves otherwise.
    - Numbers: strip currency symbols and thousands separators; keep decimals. Output as JSON numbers, not strings.
    - GST classification:
@@ -22,15 +22,17 @@ GST Invoice, Tax Invoice, E-Way Bill, Delivery Challan, Purchase Order, Credit N
      * If seller state_code differs from buyer state_code, use IGST and CGST/SGST must be 0.
      * Never infer CGST/SGST when the document explicitly shows IGST (or vice versa).
      * Prefer the tax summary section over calculated assumptions.
-   - If the extracted tax structure does not reconcile with the invoice total, set validation.tax_math_ok = false and lower overall_confidence below 0.8.
+   - total_tax MUST ALWAYS be computed as cgst + sgst + igst + cess. Never OCR total_tax from the printed footer. If the computed value differs from the printed footer value, add warning "total_tax mismatch — footer value differs from computed CGST+SGST+IGST".
+   - If the extracted tax structure does not reconcile with the invoice total, set validation.tax_math_ok = false.
    - Prefer values from the totals section over values inferred from line items.
-6. SCORE confidence honestly per field:
-   - 0.95–1.00 — printed, sharp, unambiguous, validated.
-   - 0.80–0.94 — printed but partially occluded, slight ambiguity, or failed one validator.
-   - 0.50–0.79 — handwritten, low contrast, or inferred.
-   - <0.50 — guessed; prefer null instead.
-   Never inflate confidence. A missed field hurts less than a wrong one passed as "confident".
-7. NEVER hallucinate. If a field is not present or not legible, return null. Do not invent GSTINs, addresses, totals, or line items.
+   - LINE ITEMS (multi-column textile / Surat layouts): The AMOUNT column is the single source of truth. Work backwards: rate = amount / quantity. If two numeric columns precede Amount, pick the pair where value_A × value_B = Amount (±₹1). Never pick a column whose product is inconsistent with Amount. If still ambiguous, pick the closest pair and add warning "Line item amount inconsistency on item #{sr_no} — extracted qty×rate ≠ amount".
+   - For EVERY line item, verify round(qty × rate) - discount = taxable_amount ±₹1; if it fails, push the same warning above.
+6. SCORE confidence per field (per_field_confidence object) honestly:
+   - 0.95–1.00 — clearly printed, unambiguous, directly readable.
+   - 0.75–0.94 — partially obscured, handwritten, or required inference.
+   - 0.00–0.74 — guess or could not be reliably read.
+   - Any GSTIN field that fails the 15-character regex MUST be ≤ 0.60.
+7. NEVER hallucinate. If a field is not present or not legible, return null.
 # Output contract — return ONE JSON object, nothing else
 No prose. No markdown fences. No comments. No trailing text.
 Schema:
@@ -53,14 +55,18 @@ Schema:
     { "sr_no": number|null, "description": string, "hsn_sac": string|null, "quantity": number|null, "unit": string|null, "rate": number|null, "discount": number|null, "taxable_amount": number|null, "tax_rate": number|null, "cgst_rate": number|null, "cgst": number|null, "sgst_rate": number|null, "sgst": number|null, "igst_rate": number|null, "igst": number|null, "cess_rate": number|null, "cess": number|null, "amount": number|null }
   ],
   "totals": { "subtotal": number|null, "total_discount": number|null, "taxable_amount": number|null, "cgst": number|null, "sgst": number|null, "igst": number|null, "cess": number|null, "total_tax": number|null, "tcs": number|null, "tds": number|null, "freight_charges": number|null, "other_charges": number|null, "round_off": number|null, "grand_total": number|null, "amount_in_words": string|null, "currency": string|null },
-  "payment_terms": { "terms": string|null, "due_date": string|null, "bank_account": string|null, "payment_mode": string|null } | null,
-  "bank_details": { "account_name": string|null, "account_number": string|null, "ifsc": string|null, "bank": string|null, "branch": string|null } | null,
-  "transport": { "eway_bill_no": string|null, "eway_bill_date": string|null, "vehicle_no": string|null, "transporter": string|null, "transporter_id": string|null, "lr_no": string|null, "lr_date": string|null, "mode": string|null, "distance_km": number|null } | null,
+  "payment_terms": { "payment_mode": string|null, "due_date": string|null, "due_days": number|null, "interest_rate_percent": number|null, "advance_received": number|null } | null,
+  "bank_details": { "bank_name": string|null, "account_number": string|null, "ifsc_code": string|null, "account_holder_name": string|null, "branch": string|null } | null,
+  "transport_details": { "transporter_name": string|null, "transporter_gstin": string|null, "vehicle_number": string|null, "lr_number": string|null, "lr_date": string|null, "eway_bill_number": string|null, "eway_bill_date": string|null, "dispatch_from": string|null, "ship_to": string|null, "place_of_supply": string|null, "place_of_supply_code": string|null } | null,
+  "broker_agent_details": { "broker_name": string|null, "broker_address": string|null, "agent_name": string|null, "agency_code": string|null } | null,
+  "document_references": { "challan_number": string|null, "order_number": string|null, "po_number": string|null, "case_pack_info": string|null, "reverse_charge_applicable": boolean },
   "references": { "po_number": string|null, "po_date": string|null, "challan_number": string|null, "challan_date": string|null, "invoice_reference": string|null, "contract_number": string|null },
   "authorized_signatory": { "name": string|null, "designation": string|null, "company": string|null } | null,
   "qr_code": string|null,
   "notes": string|null,
   "additional": object,
+  "gstin_seller_valid": boolean,
+  "gstin_buyer_valid": boolean,
   "validation": {
     "gstin_seller_valid": boolean|null,
     "gstin_buyer_valid": boolean|null,
@@ -68,24 +74,72 @@ Schema:
     "igst_sum_ok": boolean|null,
     "cgst_sgst_sum_ok": boolean|null,
     "grand_total_ok": boolean|null,
+    "eway_bill_required": boolean,
+    "line_items_amount_verified": boolean,
+    "bank_details_present": boolean,
+    "transport_details_present": boolean,
     "warnings": string[]
   },
   "fields": [
     { "key": string, "value": string, "confidence": number, "category": string, "source_hint": string|null }
   ],
-  "overall_confidence": number
+  "per_field_confidence": {
+    "seller_gstin": number,
+    "buyer_gstin": number,
+    "invoice_number": number,
+    "invoice_date": number,
+    "line_items": number,
+    "tax_amounts": number,
+    "grand_total": number,
+    "bank_details": number,
+    "transport_details": number
+  }
 }
 # Rules
-- "fields" MUST include every important value you extracted (seller name, GSTIN, invoice number, date, each total, etc.) with an honest confidence score and a category like "header" | "seller" | "buyer" | "line_item" | "totals" | "transport" | "bank" | "reference".
-- If a section doesn't apply (e.g. no transport block on a credit note), set that whole section to null.
+- "fields" MUST include every important value you extracted with an honest confidence score and a category like "header" | "seller" | "buyer" | "line_item" | "totals" | "transport" | "bank" | "reference".
+- If a section doesn't apply, set that whole section to null.
 - Numbers must be JSON numbers, never strings.
 - Strings: trim whitespace; preserve original casing.
-- If the document is unreadable, return a valid JSON object with document_type best-guess, all other fields null, overall_confidence below 0.3, and at least one warning explaining why.
+- Do NOT emit overall_confidence. Use per_field_confidence instead.
+- Validation rules to ALWAYS compute and return:
+  * eway_bill_required: true if totals.taxable_amount > 50000 AND a transport section is present.
+  * line_items_amount_verified: true only if EVERY line item passes round(qty × rate) - discount = taxable_amount ±₹1.
+  * bank_details_present: true if bank_details was found.
+  * transport_details_present: true if a transport section was found.
+- Warnings to push into validation.warnings when their condition holds:
+  * Seller GSTIN fails regex → "GSTIN seller format invalid — verify manually"
+  * Buyer GSTIN fails regex → "GSTIN buyer format invalid — verify manually"
+  * Any line item where qty×rate ≠ amount ±₹1 → "Line item amount inconsistency on item #{sr_no} — extracted qty×rate ≠ amount"
+  * Computed total_tax ≠ footer total_tax → "total_tax mismatch — footer value differs from computed CGST+SGST+IGST"
+  * taxable_amount > 50000 and no eway_bill_number → "E-way bill missing — taxable amount exceeds ₹50,000"
+  * Seller GSTIN state code ≠ state in seller address → "Seller GSTIN state code {XX} does not match seller address state"
 # Multi-invoice documents (CRITICAL)
-- A single PDF or image set may contain MORE THAN ONE invoice/document (e.g. three separate invoices stitched into one PDF, or per-page invoices).
-- Detect distinct documents by separate headers, separate invoice numbers, separate seller/buyer blocks, separate totals, or visual page boundaries.
+- A single PDF or image set may contain MORE THAN ONE invoice/document.
 - If you find ONE document, return a single JSON object as specified above.
 - If you find TWO OR MORE documents, return: { "documents": [ <object1>, <object2>, ... ] } where each element follows the full schema above. Do NOT merge line items across different invoices.
+
+CRITICAL EXTRACTION RULES:
+
+1. GSTIN VALIDATION: A GSTIN is always exactly 15 characters. Count characters. If not 15, mark as invalid and set confidence ≤ 0.60. Regex: [0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}
+
+2. LINE ITEM VERIFICATION: For each line item, verify round(qty × rate) - discount = taxable_amount ±1. If not, set warning and try alternate column readings before giving up.
+
+3. TAX COMPUTATION: total_tax = cgst + sgst + igst + cess. Always compute. Never OCR from footer. If footer differs, warn.
+
+4. BANK DETAILS: Always extract from "Bank Details" section at invoice bottom.
+
+5. E-WAY BILL: Always extract if present. Look for: "Eway Bill No", "E-way Bill", "EWB No", "E-Way Bill Number".
+
+6. LR NUMBER: Always extract Lorry Receipt / LR No from transport section.
+
+7. BROKER / AGENT: Look for "Broker:", "Agent:", "Through:" — always extract if present.
+
+8. PLACE OF SUPPLY: State name or 2-digit code — extract from near buyer address or from explicit "Place of Supply:" field.
+
+9. NULL OVER HALLUCINATION: Return null for any field not found. Never guess or hallucinate GSTIN, amounts, or document reference numbers.
+
+10. SELLER vs BUYER GSTIN: Seller GSTIN is in header/letterhead only. Buyer GSTIN is in Bill To / Buyer section only. Never mix them.
+
 Output JSON only.`;
 
 export type ExtractCoreResult = {
