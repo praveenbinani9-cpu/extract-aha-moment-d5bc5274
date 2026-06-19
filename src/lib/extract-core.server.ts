@@ -507,6 +507,8 @@ async function callGeminiPdf(images: string[], hint?: string): Promise<string> {
     body: JSON.stringify({
       model: "google/gemini-2.5-flash",
       temperature: 0,
+      top_p: 1,
+      seed: 7,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
