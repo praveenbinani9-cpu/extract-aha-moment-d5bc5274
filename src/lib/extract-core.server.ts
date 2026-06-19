@@ -525,31 +525,148 @@ async function callGeminiPdf(images: string[], hint?: string): Promise<string> {
   return json.choices?.[0]?.message?.content ?? "{}";
 }
 
+function parseJsonLoose(raw: string): unknown {
+  try { return JSON.parse(raw); } catch { /* fallthrough */ }
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch { /* ignore */ } }
+  return {};
+}
+
+// Wrap seller/buyer GSTIN with { raw_value, normalized_value, is_valid }
+// WITHOUT changing the extracted string. The visible `gstin` field stays
+// as the model returned it. We expose a sibling `gstin_quality` block.
+function annotateGstinQuality(doc: ExtractedObject): void {
+  for (const key of ["seller", "buyer"] as const) {
+    const party = toObject(doc[key]);
+    if (!party) continue;
+    const raw = typeof party.gstin === "string" ? party.gstin : null;
+    if (raw === null) continue;
+    const normalized = raw.replace(/\s+/g, "").toUpperCase();
+    party.gstin_quality = {
+      raw_value: raw,
+      normalized_value: normalized,
+      is_valid: GSTIN_REGEX.test(normalized),
+    };
+  }
+}
+
+// If invoice_number === invoice_date, lower confidence and null the number.
+function reconcileInvoiceNumberDate(doc: ExtractedObject, warnings: string[]): void {
+  const num = typeof doc.document_number === "string" ? doc.document_number.trim() : null;
+  const date = typeof doc.document_date === "string" ? doc.document_date.trim() : null;
+  const looksLikeDate = num ? /^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$/.test(num) : false;
+  if (num && (num === date || looksLikeDate)) {
+    doc.document_number = null;
+    const pfc = toObject(doc.per_field_confidence) ?? {};
+    const c = toNumber(pfc.invoice_number);
+    pfc.invoice_number = c === null ? 0.4 : Math.min(c, 0.4);
+    doc.per_field_confidence = pfc;
+    if (!warnings.includes("Invoice number matched invoice date — cleared to null")) {
+      warnings.push("Invoice number matched invoice date — cleared to null");
+    }
+  }
+}
+
+// Compare critical fields between primary and verification runs.
+// On mismatch: keep the value from the run with higher per-field confidence
+// (default to primary) and lower the field confidence to ≤ 0.7.
+const CRITICAL_PATHS: Array<{ key: string; pfc: string; get: (d: ExtractedObject) => unknown; set: (d: ExtractedObject, v: unknown) => void }> = [
+  { key: "invoice_number", pfc: "invoice_number", get: (d) => d.document_number, set: (d, v) => { d.document_number = v as string | null; } },
+  { key: "invoice_date",   pfc: "invoice_date",   get: (d) => d.document_date,   set: (d, v) => { d.document_date = v as string | null; } },
+  { key: "seller_gstin",   pfc: "seller_gstin",   get: (d) => toObject(d.seller)?.gstin, set: (d, v) => { const s = toObject(d.seller); if (s) s.gstin = v as string | null; } },
+  { key: "buyer_gstin",    pfc: "buyer_gstin",    get: (d) => toObject(d.buyer)?.gstin,  set: (d, v) => { const b = toObject(d.buyer);  if (b) b.gstin = v as string | null; } },
+  { key: "grand_total",    pfc: "grand_total",    get: (d) => toObject(d.totals)?.grand_total, set: (d, v) => { const t = toObject(d.totals); if (t) t.grand_total = v as number | null; } },
+];
+
+function reconcileCriticalFields(primary: ExtractedObject, secondary: ExtractedObject | null, warnings: string[]): void {
+  if (!secondary) return;
+  const pfc = toObject(primary.per_field_confidence) ?? {};
+  const pfc2 = toObject(secondary.per_field_confidence) ?? {};
+  for (const f of CRITICAL_PATHS) {
+    const a = f.get(primary);
+    const b = f.get(secondary);
+    const same = JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    if (same) {
+      // Boost confidence on match (cap at 0.99).
+      const c = toNumber(pfc[f.pfc]);
+      pfc[f.pfc] = c === null ? 0.95 : Math.min(0.99, Math.max(c, 0.95));
+    } else {
+      const ca = toNumber(pfc[f.pfc]) ?? 0;
+      const cb = toNumber(pfc2[f.pfc]) ?? 0;
+      if (cb > ca) f.set(primary, b);
+      pfc[f.pfc] = Math.min(ca, cb, 0.7);
+      warnings.push(`Critical field "${f.key}" disagreed across verification runs — confidence lowered`);
+    }
+  }
+  primary.per_field_confidence = pfc;
+}
+
+function postProcess(parsed: unknown, secondary: unknown | null): unknown {
+  const root = toObject(parsed);
+  if (!root) return parsed;
+  const sec = toObject(secondary);
+  const apply = (doc: ExtractedObject, secDoc: ExtractedObject | null) => {
+    const validation = toObject(doc.validation) ?? {};
+    const warnings: string[] = Array.isArray(validation.warnings) ? (validation.warnings as string[]) : [];
+    reconcileInvoiceNumberDate(doc, warnings);
+    reconcileCriticalFields(doc, secDoc, warnings);
+    annotateGstinQuality(doc);
+    validation.warnings = warnings;
+    doc.validation = validation;
+  };
+  if (Array.isArray(root.documents)) {
+    const secDocs = sec && Array.isArray(sec.documents) ? (sec.documents as unknown[]) : [];
+    root.documents.forEach((doc, i) => {
+      const d = toObject(doc); if (!d) return;
+      apply(d, toObject(secDocs[i] ?? null));
+    });
+  } else {
+    apply(root, sec);
+  }
+  return root;
+}
+
+// Lightweight second pass that ONLY re-extracts critical fields, used to
+// detect cross-run instability. Reuses the same model/temperature/seed.
+async function verifyCriticalFields(images: string[], hasPdf: boolean, hint?: string): Promise<unknown | null> {
+  try {
+    const raw = hasPdf ? await callGeminiPdf(images, hint) : await callGroqVision(images, hint);
+    return normalizeResponse(parseJsonLoose(raw));
+  } catch {
+    return null;
+  }
+}
+
 export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreResult> {
   const hasPdf = images.some((url) => {
     if (url.startsWith("data:")) return isPdfDataUri(url);
     return detectMimeType(url) === "application/pdf";
   });
 
-  // PDFs go through Gemini (native multi-page PDF support); images via Groq.
-  const raw = hasPdf ? await callGeminiPdf(images, hint) : await callGroqVision(images, hint);
+  let parsed: unknown;
 
-  let parsed: unknown = {};
-  let pretty = raw;
-  try {
-    parsed = normalizeResponse(JSON.parse(raw));
-    pretty = JSON.stringify(parsed, null, 2);
-  } catch {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) {
-      try {
-        parsed = normalizeResponse(JSON.parse(m[0]));
-        pretty = JSON.stringify(parsed, null, 2);
-      } catch {
-        /* keep raw */
-      }
+  if (!hasPdf && images.length > 1) {
+    // Process each image independently to prevent cross-page contamination,
+    // then merge into a multi-document envelope. Run in parallel.
+    const perImage = await Promise.all(
+      images.map(async (img) => normalizeResponse(parseJsonLoose(await callGroqVision([img], hint)))),
+    );
+    const docs: unknown[] = [];
+    for (const r of perImage) {
+      const o = toObject(r);
+      if (o && Array.isArray(o.documents)) docs.push(...o.documents);
+      else if (o) docs.push(o);
     }
+    parsed = docs.length === 1 ? docs[0] : { documents: docs };
+  } else {
+    const raw = hasPdf ? await callGeminiPdf(images, hint) : await callGroqVision(images, hint);
+    parsed = normalizeResponse(parseJsonLoose(raw));
   }
 
+  // Consistency double-pass for critical fields (best-effort; ignored on failure).
+  const secondary = await verifyCriticalFields(images, hasPdf, hint);
+  parsed = postProcess(parsed, secondary);
+
+  const pretty = JSON.stringify(parsed, null, 2);
   return { json: pretty, parsed };
 }
