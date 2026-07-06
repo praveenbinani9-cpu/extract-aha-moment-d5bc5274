@@ -197,10 +197,23 @@ export const Route = createFileRoute("/api/v1/extract")({
       : async ({ request }) => {
         // ── Auth ──
         const authHeader = request.headers.get("authorization") ?? "";
-        const apiKey = authHeader.startsWith("Bearer ")
-          ? authHeader.slice("Bearer ".length).trim()
-          : "";
-        if (!apiKey) return json({ error: "Missing Bearer api_key" }, 401);
+        const xApiKey = request.headers.get("x-api-key") ?? "";
+
+        const apiKey =
+           xApiKey ||
+           (authHeader.startsWith("Bearer ")
+             ? authHeader.slice("Bearer ".length).trim()
+             : "");
+
+        if (!apiKey) {
+          return json(
+            {
+              error: "Missing API Key. Use 'Authorization: Bearer <key>' or 'x-api-key'.",
+            },
+            401
+          );
+        }
+        
 
         // ── Parse body (JSON or multipart) ──
         const parsed = await parseRequest(request);
