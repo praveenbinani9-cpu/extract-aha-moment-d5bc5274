@@ -223,7 +223,7 @@ export const Route = createFileRoute("/api/v1/extract")({
           },
         }),
 
-      : async ({ request }) => {
+      POST: async ({ request }) => {
         // ── Auth ──
         const authHeader = request.headers.get("authorization") ?? "";
         const xApiKey = request.headers.get("x-api-key") ?? "";
