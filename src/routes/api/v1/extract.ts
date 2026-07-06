@@ -288,7 +288,14 @@ export const Route = createFileRoute("/api/v1/extract")({
         } catch (e) {
           return json({ error: e instanceof Error ? e.message : "Extraction failed" }, 502);
         }
+        const extractionTime = Date.now() - startTime;
 
+           logRequest(requestId, "EXTRACTION_COMPLETED", {
+             tenantId: tenant.id,
+             pages: images.length,
+             latencyMs: extractionTime,
+             confidence: result.parsed?.overall_confidence ?? null,
+           });
         // ── Save to DB ──
         const parsedJson = result.parsed as Record<string, unknown> | null;
         const documentsArr = Array.isArray(parsedJson?.documents)
