@@ -1,6 +1,54 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 
+async function authenticateRequest(request: Request) {
+  const apiKey =
+    request.headers.get("x-api-key") ||
+    request.headers.get("authorization")?.replace("Bearer ", "");
+
+  if (!apiKey) {
+    throw new Response(
+      JSON.stringify({
+        success: false,
+        error: "Missing API Key",
+      }),
+      { status: 401 }
+    );
+  }
+
+  const { supabaseAdmin } = await import(
+    "@/integrations/supabase/client.server"
+  );
+
+  const { data: tenant, error } = await supabaseAdmin
+    .from("tenants")
+    .select("*")
+    .eq("api_key", apiKey)
+    .single();
+
+  if (error || !tenant) {
+    throw new Response(
+      JSON.stringify({
+        success: false,
+        error: "Invalid API Key",
+      }),
+      { status: 401 }
+    );
+  }
+
+  if (tenant.status !== "active") {
+    throw new Response(
+      JSON.stringify({
+        success: false,
+        error: "Tenant Disabled",
+      }),
+      { status: 403 }
+    );
+  }
+
+  return tenant;
+}
+
 // ── Schema for JSON body (base64 approach) ──────────────────────────────────
 const JsonBody = z.object({
   images: z.array(z.string().min(20)).min(1).max(8),
@@ -146,7 +194,7 @@ export const Route = createFileRoute("/api/v1/extract")({
           },
         }),
 
-      POST: async ({ request }) => {
+      : async ({ request }) => {
         // ── Auth ──
         const authHeader = request.headers.get("authorization") ?? "";
         const apiKey = authHeader.startsWith("Bearer ")
