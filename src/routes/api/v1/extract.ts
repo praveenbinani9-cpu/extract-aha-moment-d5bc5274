@@ -190,7 +190,8 @@ export const Route = createFileRoute("/api/v1/extract")({
           headers: {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "POST, OPTIONS",
-            "access-control-allow-headers": "Content-Type, Authorization",
+            "access-control-allow-headers":
+            "Content-Type, Authorization, x-api-key, x-request-id",
           },
         }),
 
