@@ -45,6 +45,9 @@ logRequest(requestId, "REQUEST_STARTED", {
   }
 
   if (tenant.status !== "active") {
+    logRequest(requestId, "TENANT_AUTHENTICATED", {
+      tenantId: tenant.id,
+    });
     throw new Response(
       JSON.stringify({
         success: false,
