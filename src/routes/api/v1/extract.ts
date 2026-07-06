@@ -9,13 +9,21 @@ async function authenticateRequest(request: Request) {
   if (!apiKey) {
     throw new Response(
       JSON.stringify({
-        success: false,
+        success: false
         error: "Missing API Key",
       }),
       { status: 401 }
     );
   }
+  const requestId = generateRequestId();
+  const startTime = Date.now();
 
+logRequest(requestId, "REQUEST_STARTED", {
+  ip:
+    request.headers.get("x-forwarded-for") ??
+    request.headers.get("cf-connecting-ip") ??
+    "unknown",
+});
   const { supabaseAdmin } = await import(
     "@/integrations/supabase/client.server"
   );
@@ -72,7 +80,24 @@ function currentMonth(): string {
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   return `${y}-${m}`;
 }
+function generateRequestId(): string {
+  return crypto.randomUUID();
+}
 
+function logRequest(
+  requestId: string,
+  stage: string,
+  data: Record<string, unknown>
+) {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      requestId,
+      stage,
+      ...data,
+    })
+  );
+}
 // ── Detect MIME type from base64 magic bytes ─────────────────────────────────
 function detectMimeType(b64: string): string {
   try {
