@@ -9,7 +9,7 @@ async function authenticateRequest(request: Request) {
   if (!apiKey) {
     throw new Response(
       JSON.stringify({
-        success: false
+        success: false,
         error: "Missing API Key",
       }),
       { status: 401 }
