@@ -15,6 +15,7 @@ export function SiteNav() {
           <a href="/#features" className="transition hover:text-foreground">Features</a>
           <a href="/#how" className="transition hover:text-foreground">How it works</a>
           <a href="/#pricing" className="transition hover:text-foreground">Pricing</a>
+          <a href="/docs" className="transition hover:text-foreground">API Docs</a>
         </nav>
         <Link
           to="/upload"
