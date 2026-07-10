@@ -269,6 +269,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      generate_monthly_invoices: { Args: never; Returns: number }
       increment_usage: {
         Args: { p_count?: number; p_month: string; p_tenant_id: string }
         Returns: undefined
