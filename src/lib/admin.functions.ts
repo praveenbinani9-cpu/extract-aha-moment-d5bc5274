@@ -89,7 +89,7 @@ export const listInvoices = createServerFn({ method: "GET" }).handler(async () =
     .order("billing_month", { ascending: false })
     .limit(200);
   if (error) throw new Error(error.message);
-  return (data ?? []) as unknown as Array<Record<string, unknown>>;
+  return { invoices: (data ?? []) as unknown as Array<Record<string, string | number | boolean | null>> };
 });
 
 export const markInvoicePaid = createServerFn({ method: "POST" })
