@@ -269,6 +269,7 @@ export const Route = createFileRoute("/api/v1/extract")({
           created_at: inserted?.created_at ?? null,
           document_type,
           overall_confidence,
+          billed_pages: billedPages,
           data: parsedJson,
         });
       },
