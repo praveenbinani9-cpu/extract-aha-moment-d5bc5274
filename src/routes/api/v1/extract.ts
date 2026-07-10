@@ -1,65 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 
-async function authenticateRequest(request: Request) {
-  const apiKey =
-    request.headers.get("x-api-key") ||
-    request.headers.get("authorization")?.replace("Bearer ", "");
-
-  if (!apiKey) {
-    throw new Response(
-      JSON.stringify({
-        success: false,
-        error: "Missing API Key",
-      }),
-      { status: 401 }
-    );
-  }
-  const requestId = generateRequestId();
-  const startTime = Date.now();
-
-logRequest(requestId, "REQUEST_STARTED", {
-  ip:
-    request.headers.get("x-forwarded-for") ??
-    request.headers.get("cf-connecting-ip") ??
-    "unknown",
-});
-  const { supabaseAdmin } = await import(
-    "@/integrations/supabase/client.server"
-  );
-
-  const { data: tenant, error } = await supabaseAdmin
-    .from("tenants")
-    .select("*")
-    .eq("api_key", apiKey)
-    .single();
-
-  if (error || !tenant) {
-    throw new Response(
-      JSON.stringify({
-        success: false,
-        error: "Invalid API Key",
-      }),
-      { status: 401 }
-    );
-  }
-
-  if (tenant.status !== "active") {
-    logRequest(requestId, "TENANT_AUTHENTICATED", {
-      tenantId: tenant.id,
-    });
-    throw new Response(
-      JSON.stringify({
-        success: false,
-        error: "Tenant Disabled",
-      }),
-      { status: 403 }
-    );
-  }
-
-  return tenant;
-}
-
 // ── Schema for JSON body (base64 approach) ──────────────────────────────────
 const JsonBody = z.object({
   images: z.array(z.string().min(20)).min(1).max(8),
@@ -83,24 +24,7 @@ function currentMonth(): string {
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   return `${y}-${m}`;
 }
-function generateRequestId(): string {
-  return crypto.randomUUID();
-}
 
-function logRequest(
-  requestId: string,
-  stage: string,
-  data: Record<string, unknown>
-) {
-  console.log(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      requestId,
-      stage,
-      ...data,
-    })
-  );
-}
 // ── Detect MIME type from base64 magic bytes ─────────────────────────────────
 function detectMimeType(b64: string): string {
   try {
@@ -193,7 +117,7 @@ async function parseRequest(
       if (file.type && !allowed.includes(file.type)) {
         return { error: `Unsupported file type: ${file.type}. Allowed: JPG, PNG, WEBP, PDF.`, status: 400 };
       }
-      if (file.size > 10 * 1024 * 1024) {
+      if (file.size > 4 * 1024 * 1024) {
         return { error: `File "${file.name}" exceeds 10 MB limit.`, status: 400 };
       }
     }
@@ -218,31 +142,17 @@ export const Route = createFileRoute("/api/v1/extract")({
           headers: {
             "access-control-allow-origin": "*",
             "access-control-allow-methods": "POST, OPTIONS",
-            "access-control-allow-headers":
-            "Content-Type, Authorization, x-api-key, x-request-id",
+            "access-control-allow-headers": "Content-Type, Authorization",
           },
         }),
 
       POST: async ({ request }) => {
         // ── Auth ──
         const authHeader = request.headers.get("authorization") ?? "";
-        const xApiKey = request.headers.get("x-api-key") ?? "";
-
-        const apiKey =
-           xApiKey ||
-           (authHeader.startsWith("Bearer ")
-             ? authHeader.slice("Bearer ".length).trim()
-             : "");
-
-        if (!apiKey) {
-          return json(
-            {
-              error: "Missing API Key. Use 'Authorization: Bearer <key>' or 'x-api-key'.",
-            },
-            401
-          );
-        }
-        
+        const apiKey = authHeader.startsWith("Bearer ")
+          ? authHeader.slice("Bearer ".length).trim()
+          : "";
+        if (!apiKey) return json({ error: "Missing Bearer api_key" }, 401);
 
         // ── Parse body (JSON or multipart) ──
         const parsed = await parseRequest(request);
@@ -288,14 +198,7 @@ export const Route = createFileRoute("/api/v1/extract")({
         } catch (e) {
           return json({ error: e instanceof Error ? e.message : "Extraction failed" }, 502);
         }
-        const extractionTime = Date.now() - startTime;
 
-           logRequest(requestId, "EXTRACTION_COMPLETED", {
-             tenantId: tenant.id,
-             pages: images.length,
-             latencyMs: extractionTime,
-             confidence: result.parsed?.overall_confidence ?? null,
-           });
         // ── Save to DB ──
         const parsedJson = result.parsed as Record<string, unknown> | null;
         const documentsArr = Array.isArray(parsedJson?.documents)
