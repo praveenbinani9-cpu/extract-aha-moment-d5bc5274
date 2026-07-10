@@ -79,3 +79,67 @@ export const listRecentExtractions = createServerFn({ method: "GET" }).handler(a
   if (error) throw new Error(error.message);
   return data ?? [];
 });
+
+// ── Billing admin ──────────────────────────────────────────────────────────
+export const listInvoices = createServerFn({ method: "GET" }).handler(async () => {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data, error } = await supabaseAdmin
+    .from("invoices" as never)
+    .select("id, tenant_id, billing_month, total_pages, total_amount, status, due_date, generated_at, paid_at, payment_reference, notes, tenants(name)")
+    .order("billing_month", { ascending: false })
+    .limit(200);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as unknown as Array<Record<string, unknown>>;
+});
+
+export const markInvoicePaid = createServerFn({ method: "POST" })
+  .inputValidator((d: unknown) =>
+    z
+      .object({
+        invoiceId: z.string().uuid(),
+        paymentReference: z.string().min(1).max(200),
+        notes: z.string().max(2000).optional(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error } = await supabaseAdmin
+      .from("invoices" as never)
+      .update({
+        status: "paid",
+        paid_at: new Date().toISOString(),
+        payment_reference: data.paymentReference,
+        notes: data.notes ?? null,
+      } as never)
+      .eq("id", data.invoiceId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+export const updateTenantBilling = createServerFn({ method: "POST" })
+  .inputValidator((d: unknown) =>
+    z
+      .object({
+        id: z.string().uuid(),
+        rate_per_page: z.number().min(0).max(10000).optional(),
+        billing_contact_name: z.string().max(200).nullish(),
+        billing_email: z.string().email().max(200).nullish(),
+        billing_phone: z.string().max(50).nullish(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const patch: Record<string, unknown> = {};
+    if (data.rate_per_page !== undefined) patch.rate_per_page = data.rate_per_page;
+    if (data.billing_contact_name !== undefined) patch.billing_contact_name = data.billing_contact_name;
+    if (data.billing_email !== undefined) patch.billing_email = data.billing_email;
+    if (data.billing_phone !== undefined) patch.billing_phone = data.billing_phone;
+    const { error } = await supabaseAdmin
+      .from("tenants")
+      .update(patch as never)
+      .eq("id", data.id);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
