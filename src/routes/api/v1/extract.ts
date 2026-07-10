@@ -164,13 +164,15 @@ export const Route = createFileRoute("/api/v1/extract")({
 
         const { data: tenant, error: tenantErr } = await supabaseAdmin
           .from("tenants")
-          .select("id, status, monthly_limit")
+          .select("id, status, monthly_limit, rate_per_page")
           .eq("api_key", apiKey)
           .maybeSingle();
 
         if (tenantErr) return json({ error: "Lookup failed" }, 500);
         if (!tenant)   return json({ error: "Invalid api_key" }, 401);
         if (tenant.status !== "active") return json({ error: "Tenant is disabled" }, 403);
+
+        const ratePerPage = Number((tenant as { rate_per_page: number | string | null }).rate_per_page ?? 0) || 0;
 
         // ── Usage check ──
         const month = currentMonth();
@@ -189,6 +191,19 @@ export const Route = createFileRoute("/api/v1/extract")({
         if (limit > 0 && used >= limit) {
           return json({ error: "Monthly limit exceeded" }, 429);
         }
+
+        // ── Count billable pages (real PDF page counts; images = 1 each) ──
+        const { countPdfPages, isPdfDataUri } = await import("@/lib/pdf-pages.server");
+        let billedPages = 0;
+        for (const img of images) {
+          if (isPdfDataUri(img)) {
+            const n = await countPdfPages(img);
+            billedPages += n && n > 0 ? n : 1;
+          } else {
+            billedPages += 1;
+          }
+        }
+        if (billedPages < 1) billedPages = images.length || 1;
 
         // ── Extract ──
         const { extractCore } = await import("@/lib/extract-core.server");
@@ -223,8 +238,9 @@ export const Route = createFileRoute("/api/v1/extract")({
             document_type,
             overall_confidence,
             page_count: docCount,
+            billed_pages: billedPages,
             result: (parsedJson ?? {}) as never,
-          })
+          } as never)
           .select("id, created_at")
           .single();
 
@@ -237,6 +253,14 @@ export const Route = createFileRoute("/api/v1/extract")({
             p_count: docCount,
           });
           if (rpcErr) console.error("increment_usage failed", rpcErr);
+
+          // ── Record billable usage (never let this affect the response) ──
+          try {
+            const { recordUsage } = await import("@/lib/billing.server");
+            await recordUsage(tenant.id, inserted.id, billedPages, ratePerPage);
+          } catch (err) {
+            console.error("recordUsage failed", err);
+          }
         }
 
         return json({
@@ -245,6 +269,7 @@ export const Route = createFileRoute("/api/v1/extract")({
           created_at: inserted?.created_at ?? null,
           document_type,
           overall_confidence,
+          billed_pages: billedPages,
           data: parsedJson,
         });
       },

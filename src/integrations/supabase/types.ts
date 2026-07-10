@@ -14,8 +14,33 @@ export type Database = {
   }
   public: {
     Tables: {
+      billing_errors: {
+        Row: {
+          created_at: string
+          error_message: string
+          extraction_id: string | null
+          id: string
+          tenant_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          error_message: string
+          extraction_id?: string | null
+          id?: string
+          tenant_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          error_message?: string
+          extraction_id?: string | null
+          id?: string
+          tenant_id?: string | null
+        }
+        Relationships: []
+      }
       extractions: {
         Row: {
+          billed_pages: number | null
           created_at: string
           document_type: string | null
           id: string
@@ -25,6 +50,7 @@ export type Database = {
           tenant_id: string
         }
         Insert: {
+          billed_pages?: number | null
           created_at?: string
           document_type?: string | null
           id?: string
@@ -34,6 +60,7 @@ export type Database = {
           tenant_id: string
         }
         Update: {
+          billed_pages?: number | null
           created_at?: string
           document_type?: string | null
           id?: string
@@ -45,6 +72,59 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "extractions_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      invoices: {
+        Row: {
+          billing_month: string
+          due_date: string
+          generated_at: string
+          id: string
+          notes: string | null
+          paid_at: string | null
+          payment_method: string
+          payment_reference: string | null
+          status: string
+          tenant_id: string
+          total_amount: number
+          total_pages: number
+        }
+        Insert: {
+          billing_month: string
+          due_date: string
+          generated_at?: string
+          id?: string
+          notes?: string | null
+          paid_at?: string | null
+          payment_method?: string
+          payment_reference?: string | null
+          status?: string
+          tenant_id: string
+          total_amount: number
+          total_pages: number
+        }
+        Update: {
+          billing_month?: string
+          due_date?: string
+          generated_at?: string
+          id?: string
+          notes?: string | null
+          paid_at?: string | null
+          payment_method?: string
+          payment_reference?: string | null
+          status?: string
+          tenant_id?: string
+          total_amount?: number
+          total_pages?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invoices_tenant_id_fkey"
             columns: ["tenant_id"]
             isOneToOne: false
             referencedRelation: "tenants"
@@ -90,35 +170,106 @@ export type Database = {
       tenants: {
         Row: {
           api_key: string
+          billing_contact_name: string | null
+          billing_email: string | null
+          billing_phone: string | null
           created_at: string
           id: string
           monthly_limit: number
           name: string
+          rate_per_page: number
           status: string
         }
         Insert: {
           api_key: string
+          billing_contact_name?: string | null
+          billing_email?: string | null
+          billing_phone?: string | null
           created_at?: string
           id?: string
           monthly_limit?: number
           name: string
+          rate_per_page?: number
           status?: string
         }
         Update: {
           api_key?: string
+          billing_contact_name?: string | null
+          billing_email?: string | null
+          billing_phone?: string | null
           created_at?: string
           id?: string
           monthly_limit?: number
           name?: string
+          rate_per_page?: number
           status?: string
         }
         Relationships: []
+      }
+      usage_ledger: {
+        Row: {
+          amount: number
+          billing_month: string
+          created_at: string
+          extraction_id: string
+          id: string
+          invoice_id: string | null
+          page_count: number
+          rate_per_page: number
+          tenant_id: string
+        }
+        Insert: {
+          amount: number
+          billing_month: string
+          created_at?: string
+          extraction_id: string
+          id?: string
+          invoice_id?: string | null
+          page_count: number
+          rate_per_page: number
+          tenant_id: string
+        }
+        Update: {
+          amount?: number
+          billing_month?: string
+          created_at?: string
+          extraction_id?: string
+          id?: string
+          invoice_id?: string | null
+          page_count?: number
+          rate_per_page?: number
+          tenant_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "usage_ledger_extraction_id_fkey"
+            columns: ["extraction_id"]
+            isOneToOne: true
+            referencedRelation: "extractions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "usage_ledger_invoice_id_fkey"
+            columns: ["invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "usage_ledger_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
+      generate_monthly_invoices: { Args: never; Returns: number }
       increment_usage: {
         Args: { p_count?: number; p_month: string; p_tenant_id: string }
         Returns: undefined

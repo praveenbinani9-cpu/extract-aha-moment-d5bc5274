@@ -14,7 +14,9 @@ import { Route as ExtractRouteImport } from './routes/extract'
 import { Route as ApiTestRouteImport } from './routes/api-test'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiV1InvoicesRouteImport } from './routes/api/v1/invoices'
 import { Route as ApiV1ExtractRouteImport } from './routes/api/v1/extract'
+import { Route as ApiV1UsageCurrentRouteImport } from './routes/api/v1/usage.current'
 
 const UploadRoute = UploadRouteImport.update({
   id: '/upload',
@@ -41,9 +43,19 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiV1InvoicesRoute = ApiV1InvoicesRouteImport.update({
+  id: '/api/v1/invoices',
+  path: '/api/v1/invoices',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1ExtractRoute = ApiV1ExtractRouteImport.update({
   id: '/api/v1/extract',
   path: '/api/v1/extract',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV1UsageCurrentRoute = ApiV1UsageCurrentRouteImport.update({
+  id: '/api/v1/usage/current',
+  path: '/api/v1/usage/current',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -54,6 +66,8 @@ export interface FileRoutesByFullPath {
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
+  '/api/v1/invoices': typeof ApiV1InvoicesRoute
+  '/api/v1/usage/current': typeof ApiV1UsageCurrentRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -62,6 +76,8 @@ export interface FileRoutesByTo {
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
+  '/api/v1/invoices': typeof ApiV1InvoicesRoute
+  '/api/v1/usage/current': typeof ApiV1UsageCurrentRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -71,6 +87,8 @@ export interface FileRoutesById {
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
+  '/api/v1/invoices': typeof ApiV1InvoicesRoute
+  '/api/v1/usage/current': typeof ApiV1UsageCurrentRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -81,8 +99,18 @@ export interface FileRouteTypes {
     | '/extract'
     | '/upload'
     | '/api/v1/extract'
+    | '/api/v1/invoices'
+    | '/api/v1/usage/current'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/api-test' | '/extract' | '/upload' | '/api/v1/extract'
+  to:
+    | '/'
+    | '/admin'
+    | '/api-test'
+    | '/extract'
+    | '/upload'
+    | '/api/v1/extract'
+    | '/api/v1/invoices'
+    | '/api/v1/usage/current'
   id:
     | '__root__'
     | '/'
@@ -91,6 +119,8 @@ export interface FileRouteTypes {
     | '/extract'
     | '/upload'
     | '/api/v1/extract'
+    | '/api/v1/invoices'
+    | '/api/v1/usage/current'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -100,6 +130,8 @@ export interface RootRouteChildren {
   ExtractRoute: typeof ExtractRoute
   UploadRoute: typeof UploadRoute
   ApiV1ExtractRoute: typeof ApiV1ExtractRoute
+  ApiV1InvoicesRoute: typeof ApiV1InvoicesRoute
+  ApiV1UsageCurrentRoute: typeof ApiV1UsageCurrentRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -139,11 +171,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/v1/invoices': {
+      id: '/api/v1/invoices'
+      path: '/api/v1/invoices'
+      fullPath: '/api/v1/invoices'
+      preLoaderRoute: typeof ApiV1InvoicesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/extract': {
       id: '/api/v1/extract'
       path: '/api/v1/extract'
       fullPath: '/api/v1/extract'
       preLoaderRoute: typeof ApiV1ExtractRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v1/usage/current': {
+      id: '/api/v1/usage/current'
+      path: '/api/v1/usage/current'
+      fullPath: '/api/v1/usage/current'
+      preLoaderRoute: typeof ApiV1UsageCurrentRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -156,6 +202,8 @@ const rootRouteChildren: RootRouteChildren = {
   ExtractRoute: ExtractRoute,
   UploadRoute: UploadRoute,
   ApiV1ExtractRoute: ApiV1ExtractRoute,
+  ApiV1InvoicesRoute: ApiV1InvoicesRoute,
+  ApiV1UsageCurrentRoute: ApiV1UsageCurrentRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
