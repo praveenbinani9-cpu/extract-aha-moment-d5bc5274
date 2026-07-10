@@ -164,13 +164,15 @@ export const Route = createFileRoute("/api/v1/extract")({
 
         const { data: tenant, error: tenantErr } = await supabaseAdmin
           .from("tenants")
-          .select("id, status, monthly_limit")
+          .select("id, status, monthly_limit, rate_per_page")
           .eq("api_key", apiKey)
           .maybeSingle();
 
         if (tenantErr) return json({ error: "Lookup failed" }, 500);
         if (!tenant)   return json({ error: "Invalid api_key" }, 401);
         if (tenant.status !== "active") return json({ error: "Tenant is disabled" }, 403);
+
+        const ratePerPage = Number((tenant as { rate_per_page: number | string | null }).rate_per_page ?? 0) || 0;
 
         // ── Usage check ──
         const month = currentMonth();
