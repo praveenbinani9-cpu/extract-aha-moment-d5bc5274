@@ -10,7 +10,7 @@
 | Animations | Framer Motion |
 | Server logic | TanStack `createServerFn` + server routes under `src/routes/api/` |
 | Database / Auth / Storage | Lovable Cloud (managed Postgres + RLS) |
-| LLM providers | **Groq** (`meta-llama/llama-4-scout-17b-16e-instruct`) primary; Gemini fallback |
+| LLM providers | **Groq** (`meta-llama/llama-4-scout-17b-16e-instruct`) primary for images; **Google Gemini** (`gemini-2.5-flash`) via direct Google API for PDFs and low-confidence cascade / hard-failure fallback |
 | PDF rendering (client) | `pdfjs-dist` |
 | Deployment target | Cloudflare Workers (edge) via TanStack Start adapter |
 
