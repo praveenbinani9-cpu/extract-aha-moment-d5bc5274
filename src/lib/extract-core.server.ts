@@ -1082,26 +1082,50 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   let overall_confidence = 0;
 
   if (hasPdf) {
-    // PDFs: try Vertex AI first, fall back to Lovable AI Gateway (separate
-    // quota pool) on any Vertex failure so a 429 / timeout / auth issue
-    // does not block extraction.
-    try {
-      parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
-      provider_used = "gemini";
-      overall_confidence = getOverallConfidence(parsed);
-      console.log("[extract]", { rid, provider_used, fallback: false, hasPdf, overall_confidence });
-    } catch (vertexErr) {
-      const vertexMsg = vertexErr instanceof Error ? vertexErr.message : String(vertexErr);
-      console.warn("[extract] Vertex failed for PDF; trying Lovable AI Gateway", { rid, error: vertexMsg });
+    // PDFs: use Lovable AI Gateway first. Direct Vertex has been producing
+    // model-capacity 429s / gateway timeouts even for small multi-page PDFs;
+    // billing credit does not bypass those model-serving limits. Keep Vertex
+    // as a fallback, or force it first with VERTEX_PDF_FIRST=true.
+    const vertexFirst = process.env.VERTEX_PDF_FIRST === "true";
+    if (!vertexFirst) {
       try {
         parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
         provider_used = "gemini";
         overall_confidence = getOverallConfidence(parsed);
-        console.log("[extract]", { rid, provider_used, fallback: true, via: "lovable-ai", hasPdf, overall_confidence });
+        console.log("[extract]", { rid, provider_used, primary: "lovable-ai", hasPdf, overall_confidence });
       } catch (gwErr) {
         const gwMsg = gwErr instanceof Error ? gwErr.message : String(gwErr);
-        console.error("[extract] Both Vertex and Lovable AI Gateway failed for PDF", { rid, vertex: vertexMsg, gateway: gwMsg });
-        throw new Error(`PDF extraction failed. Vertex: ${vertexMsg}. Gateway fallback: ${gwMsg}`);
+        console.warn("[extract] Lovable AI Gateway failed for PDF; trying Vertex", { rid, error: gwMsg });
+        try {
+          parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+          provider_used = "gemini";
+          overall_confidence = getOverallConfidence(parsed);
+          console.log("[extract]", { rid, provider_used, fallback: true, via: "vertex", hasPdf, overall_confidence });
+        } catch (vertexErr) {
+          const vertexMsg = vertexErr instanceof Error ? vertexErr.message : String(vertexErr);
+          console.error("[extract] Both Lovable AI Gateway and Vertex failed for PDF", { rid, gateway: gwMsg, vertex: vertexMsg });
+          throw new Error(`PDF extraction failed. Gateway: ${gwMsg}. Vertex fallback: ${vertexMsg}`);
+        }
+      }
+    } else {
+      try {
+        parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+        provider_used = "gemini";
+        overall_confidence = getOverallConfidence(parsed);
+        console.log("[extract]", { rid, provider_used, primary: "vertex", hasPdf, overall_confidence });
+      } catch (vertexErr) {
+        const vertexMsg = vertexErr instanceof Error ? vertexErr.message : String(vertexErr);
+        console.warn("[extract] Vertex failed for PDF; trying Lovable AI Gateway", { rid, error: vertexMsg });
+        try {
+          parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
+          provider_used = "gemini";
+          overall_confidence = getOverallConfidence(parsed);
+          console.log("[extract]", { rid, provider_used, fallback: true, via: "lovable-ai", hasPdf, overall_confidence });
+        } catch (gwErr) {
+          const gwMsg = gwErr instanceof Error ? gwErr.message : String(gwErr);
+          console.error("[extract] Both Vertex and Lovable AI Gateway failed for PDF", { rid, vertex: vertexMsg, gateway: gwMsg });
+          throw new Error(`PDF extraction failed. Vertex: ${vertexMsg}. Gateway fallback: ${gwMsg}`);
+        }
       }
     }
   } else {
