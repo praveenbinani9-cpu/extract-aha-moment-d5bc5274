@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as UploadRouteImport } from './routes/upload'
 import { Route as ExtractRouteImport } from './routes/extract'
+import { Route as AuthRouteImport } from './routes/auth'
 import { Route as ApiTestRouteImport } from './routes/api-test'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
@@ -26,6 +27,11 @@ const UploadRoute = UploadRouteImport.update({
 const ExtractRoute = ExtractRouteImport.update({
   id: '/extract',
   path: '/extract',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthRoute = AuthRouteImport.update({
+  id: '/auth',
+  path: '/auth',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiTestRoute = ApiTestRouteImport.update({
@@ -63,6 +69,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/api-test': typeof ApiTestRoute
+  '/auth': typeof AuthRoute
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
@@ -73,6 +80,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/api-test': typeof ApiTestRoute
+  '/auth': typeof AuthRoute
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
@@ -84,6 +92,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/api-test': typeof ApiTestRoute
+  '/auth': typeof AuthRoute
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
@@ -96,6 +105,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/api-test'
+    | '/auth'
     | '/extract'
     | '/upload'
     | '/api/v1/extract'
@@ -106,6 +116,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/api-test'
+    | '/auth'
     | '/extract'
     | '/upload'
     | '/api/v1/extract'
@@ -116,6 +127,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/api-test'
+    | '/auth'
     | '/extract'
     | '/upload'
     | '/api/v1/extract'
@@ -127,6 +139,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   ApiTestRoute: typeof ApiTestRoute
+  AuthRoute: typeof AuthRoute
   ExtractRoute: typeof ExtractRoute
   UploadRoute: typeof UploadRoute
   ApiV1ExtractRoute: typeof ApiV1ExtractRoute
@@ -148,6 +161,13 @@ declare module '@tanstack/react-router' {
       path: '/extract'
       fullPath: '/extract'
       preLoaderRoute: typeof ExtractRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth': {
+      id: '/auth'
+      path: '/auth'
+      fullPath: '/auth'
+      preLoaderRoute: typeof AuthRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api-test': {
@@ -199,6 +219,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   ApiTestRoute: ApiTestRoute,
+  AuthRoute: AuthRoute,
   ExtractRoute: ExtractRoute,
   UploadRoute: UploadRoute,
   ApiV1ExtractRoute: ApiV1ExtractRoute,
