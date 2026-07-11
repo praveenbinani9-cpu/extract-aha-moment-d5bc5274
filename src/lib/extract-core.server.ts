@@ -703,7 +703,10 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const rid = reqId();
   let lastErr = "";
 
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // Longer/more attempts to smooth over Vertex DSQ (dynamic shared quota)
+  // 429 spikes in constrained regions like asia-south1.
+  const MAX_ATTEMPTS = 6;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let accessToken: string;
     try {
       accessToken = await getVertexAccessToken();
@@ -746,13 +749,17 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
       break;
     }
 
+    // Exponential backoff + jitter, honoring Retry-After / "try again in Ns"
+    // hints. Caps at 60s so a burst of tenants sharing DSQ don't all retry
+    // in lockstep.
     let waitMs = 0;
     const retryAfter = res.headers.get("retry-after");
     if (retryAfter) waitMs = Math.ceil(parseFloat(retryAfter) * 1000);
     const m = text.match(/try again in ([\d.]+)s/i);
     if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
-    if (!waitMs) waitMs = 2000 * (attempt + 1);
-    waitMs = Math.min(waitMs + 500, 30000);
+    if (!waitMs) waitMs = Math.min(60000, 2000 * Math.pow(2, attempt)); // 2s, 4s, 8s, 16s, 32s, 60s
+    const jitter = Math.floor(Math.random() * 1000);
+    waitMs = Math.min(waitMs + jitter, 60000);
     console.warn("[vertex] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
     await new Promise((r) => setTimeout(r, waitMs));
   }
