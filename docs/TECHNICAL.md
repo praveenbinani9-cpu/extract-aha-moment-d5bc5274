@@ -245,10 +245,12 @@ Visual pipeline stages (`Scan → Read → Validate → Extract → JSON`) are d
 | Var | Purpose |
 |---|---|
 | `GROQ_API_KEY` | Primary LLM provider (images) — direct call to `api.groq.com` |
-| `GOOGLE_API_KEY` | Google Gemini API key — direct call to `generativelanguage.googleapis.com` (used for PDFs and confidence cascade / hard-failure fallback) |
+| `GCP_PROJECT_ID` | Google Cloud project ID hosting Vertex AI |
+| `GCP_LOCATION` | Vertex AI region, e.g. `us-central1` |
+| `GCP_SERVICE_ACCOUNT_JSON` | Service account key JSON used to mint OAuth tokens for Vertex AI (needs **Vertex AI User** role) |
 | Lovable Cloud vars | Auto-injected (`SUPABASE_URL`, publishable + secret keys) |
 
-All are read **inside** server-function handlers, never at module scope. Enable the **Generative Language API** on the Google Cloud project that owns `GOOGLE_API_KEY` and ensure billing is active — Gemini rejects unbilled projects.
+All are read **inside** server-function handlers, never at module scope. Enable the **Vertex AI API** on the GCP project and ensure billing is active — Vertex rejects unbilled projects. Access tokens are minted via a service-account JWT signed with Web Crypto and cached in-memory ~50 minutes.
 
 ---
 
