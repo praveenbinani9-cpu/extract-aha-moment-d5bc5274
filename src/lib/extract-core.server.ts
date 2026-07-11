@@ -837,6 +837,55 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   throw new Error(lastErr || "Vertex AI Gemini call failed");
 }
 
+// Fallback: call Gemini via Lovable AI Gateway (separate quota pool from
+// direct Vertex AI). Used when Vertex 429s / auth fails / times out so PDF
+// extraction still succeeds. Uses OpenAI-compatible chat completions.
+async function callGeminiViaLovableGateway(images: string[], hint?: string): Promise<string> {
+  const apiKey = process.env.LOVABLE_API_KEY;
+  if (!apiKey) throw new Error("LOVABLE_API_KEY not configured (Lovable AI Gateway fallback unavailable)");
+
+  const content: Array<Record<string, unknown>> = [
+    {
+      type: "text",
+      text: `Extract structured data from this document.${hint ? " Hint: " + hint : ""} If multiple invoices/documents are present, return { "documents": [...] }. Return JSON only.`,
+    },
+  ];
+  for (const url of images) {
+    const dataUri = url.startsWith("data:") ? url : normalizeImageUrl(url);
+    content.push({ type: "image_url", image_url: { url: dataUri } });
+  }
+
+  const rid = reqId();
+  const body = JSON.stringify({
+    model: "google/gemini-2.5-flash",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content },
+    ],
+    temperature: 0,
+    response_format: { type: "json_object" },
+  });
+  console.log("[lovable-ai] request", { rid, payload_bytes: body.length });
+
+  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Lovable-API-Key": apiKey,
+    },
+    body,
+    signal: AbortSignal.timeout(45_000),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Lovable AI Gateway error ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return json.choices?.[0]?.message?.content ?? "{}";
+}
+
 function parseJsonLoose(raw: string): unknown {
   try { return JSON.parse(raw); } catch { /* fallthrough */ }
   const m = raw.match(/\{[\s\S]*\}/);
