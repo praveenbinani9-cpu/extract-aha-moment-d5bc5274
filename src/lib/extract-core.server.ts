@@ -749,14 +749,28 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
       throw new Error(`Vertex AI auth failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body,
-    });
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body,
+      });
+    } catch (e) {
+      // Network-level failure (DNS, TLS, ECONNRESET, request-body too large
+      // for the runtime). Retry with backoff if we still have budget;
+      // otherwise surface the underlying reason instead of a bare "fetch failed".
+      const msg = e instanceof Error ? e.message : String(e);
+      lastErr = `Vertex AI network error: ${msg} (payload_bytes≈${body.length})`;
+      console.error("[vertex] fetch threw", { rid, attempt, error: msg, payload_bytes: body.length });
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > MAX_TOTAL_WAIT_MS || attempt === MAX_ATTEMPTS - 1) break;
+      await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 500)));
+      continue;
+    }
 
     if (res.ok) {
       const json = (await res.json()) as {
