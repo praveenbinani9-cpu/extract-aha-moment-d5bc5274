@@ -83,8 +83,15 @@ function UploadPage() {
   const handleFile = useCallback(
     async (f: File) => {
       setError(null);
+      if (f.size > 10 * 1024 * 1024) {
+        setError("File exceeds 10 MB limit. Please upload a smaller file.");
+        setFile(f);
+        setStage(-1);
+        return;
+      }
       setFile(f);
       setStage(0);
+
       try {
         // visual pacing
         const tick = (i: number) => new Promise<void>((r) => setTimeout(() => { setStage(i); r(); }, 350));
