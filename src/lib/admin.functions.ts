@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { requireAdmin } from "./require-admin";
 
 function genApiKey(): string {
   // 32 random bytes hex, prefixed
@@ -9,7 +10,7 @@ function genApiKey(): string {
   return `dx_live_${hex}`;
 }
 
-export const listTenants = createServerFn({ method: "GET" }).handler(async () => {
+export const listTenants = createServerFn({ method: "GET" }).middleware([requireAdmin]).handler(async () => {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data: tenants, error } = await supabaseAdmin
     .from("tenants")
@@ -28,7 +29,7 @@ export const listTenants = createServerFn({ method: "GET" }).handler(async () =>
   return (tenants ?? []).map((t) => ({ ...t, usage: counts.get(t.id) ?? 0 }));
 });
 
-export const createTenant = createServerFn({ method: "POST" })
+export const createTenant = createServerFn({ method: "POST" }).middleware([requireAdmin])
   .inputValidator((d: unknown) => z.object({ name: z.string().min(1).max(120) }).parse(d))
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -41,7 +42,7 @@ export const createTenant = createServerFn({ method: "POST" })
     return row;
   });
 
-export const rotateApiKey = createServerFn({ method: "POST" })
+export const rotateApiKey = createServerFn({ method: "POST" }).middleware([requireAdmin])
   .inputValidator((d: unknown) => z.object({ id: z.string().uuid() }).parse(d))
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -55,7 +56,7 @@ export const rotateApiKey = createServerFn({ method: "POST" })
     return row;
   });
 
-export const setTenantStatus = createServerFn({ method: "POST" })
+export const setTenantStatus = createServerFn({ method: "POST" }).middleware([requireAdmin])
   .inputValidator((d: unknown) =>
     z.object({ id: z.string().uuid(), status: z.enum(["active", "disabled"]) }).parse(d),
   )
@@ -69,7 +70,7 @@ export const setTenantStatus = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-export const listRecentExtractions = createServerFn({ method: "GET" }).handler(async () => {
+export const listRecentExtractions = createServerFn({ method: "GET" }).middleware([requireAdmin]).handler(async () => {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data, error } = await supabaseAdmin
     .from("extractions")
@@ -81,7 +82,7 @@ export const listRecentExtractions = createServerFn({ method: "GET" }).handler(a
 });
 
 // ── Billing admin ──────────────────────────────────────────────────────────
-export const listInvoices = createServerFn({ method: "GET" }).handler(async () => {
+export const listInvoices = createServerFn({ method: "GET" }).middleware([requireAdmin]).handler(async () => {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data, error } = await supabaseAdmin
     .from("invoices" as never)
@@ -92,7 +93,7 @@ export const listInvoices = createServerFn({ method: "GET" }).handler(async () =
   return { invoices: (data ?? []) as unknown as Array<Record<string, string | number | boolean | null>> };
 });
 
-export const markInvoicePaid = createServerFn({ method: "POST" })
+export const markInvoicePaid = createServerFn({ method: "POST" }).middleware([requireAdmin])
   .inputValidator((d: unknown) =>
     z
       .object({
@@ -117,7 +118,7 @@ export const markInvoicePaid = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-export const updateTenantBilling = createServerFn({ method: "POST" })
+export const updateTenantBilling = createServerFn({ method: "POST" }).middleware([requireAdmin])
   .inputValidator((d: unknown) =>
     z
       .object({

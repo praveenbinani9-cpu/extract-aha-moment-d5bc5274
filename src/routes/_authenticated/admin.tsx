@@ -23,7 +23,7 @@ import {
 import { toast } from "sonner";
 import { Copy, KeyRound, Power, PowerOff, Plus } from "lucide-react";
 
-export const Route = createFileRoute("/admin")({
+export const Route = createFileRoute("/_authenticated/admin")({
   head: () => ({ meta: [{ title: "Admin · DocExtract AI" }] }),
   component: AdminPage,
 });
@@ -74,11 +74,24 @@ function AdminPage() {
   return (
     <div className="min-h-screen bg-background">
       <div className="mx-auto max-w-6xl px-6 py-12">
-        <header className="mb-10">
-          <h1 className="text-3xl font-semibold tracking-tight">Admin Console</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Manage tenants, API keys, and monitor extraction usage.
-          </p>
+        <header className="mb-10 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight">Admin Console</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Manage tenants, API keys, and monitor extraction usage.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              const { supabase } = await import("@/integrations/supabase/client");
+              await supabase.auth.signOut();
+              router.navigate({ to: "/auth", replace: true });
+            }}
+          >
+            Sign out
+          </Button>
         </header>
 
         <section className="rounded-xl border bg-card p-6 mb-10">
