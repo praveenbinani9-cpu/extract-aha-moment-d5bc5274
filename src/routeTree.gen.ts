@@ -13,8 +13,9 @@ import { Route as UploadRouteImport } from './routes/upload'
 import { Route as ExtractRouteImport } from './routes/extract'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as ApiTestRouteImport } from './routes/api-test'
-import { Route as AdminRouteImport } from './routes/admin'
+import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthenticatedAdminRouteImport } from './routes/_authenticated/admin'
 import { Route as ApiV1InvoicesRouteImport } from './routes/api/v1/invoices'
 import { Route as ApiV1ExtractRouteImport } from './routes/api/v1/extract'
 import { Route as ApiV1UsageCurrentRouteImport } from './routes/api/v1/usage.current'
@@ -39,15 +40,19 @@ const ApiTestRoute = ApiTestRouteImport.update({
   path: '/api-test',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AdminRoute = AdminRouteImport.update({
-  id: '/admin',
-  path: '/admin',
+const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
+  id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedAdminRoute = AuthenticatedAdminRouteImport.update({
+  id: '/admin',
+  path: '/admin',
+  getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const ApiV1InvoicesRoute = ApiV1InvoicesRouteImport.update({
   id: '/api/v1/invoices',
@@ -67,22 +72,22 @@ const ApiV1UsageCurrentRoute = ApiV1UsageCurrentRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/admin': typeof AdminRoute
   '/api-test': typeof ApiTestRoute
   '/auth': typeof AuthRoute
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
+  '/admin': typeof AuthenticatedAdminRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
   '/api/v1/invoices': typeof ApiV1InvoicesRoute
   '/api/v1/usage/current': typeof ApiV1UsageCurrentRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/admin': typeof AdminRoute
   '/api-test': typeof ApiTestRoute
   '/auth': typeof AuthRoute
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
+  '/admin': typeof AuthenticatedAdminRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
   '/api/v1/invoices': typeof ApiV1InvoicesRoute
   '/api/v1/usage/current': typeof ApiV1UsageCurrentRoute
@@ -90,11 +95,12 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/admin': typeof AdminRoute
+  '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/api-test': typeof ApiTestRoute
   '/auth': typeof AuthRoute
   '/extract': typeof ExtractRoute
   '/upload': typeof UploadRoute
+  '/_authenticated/admin': typeof AuthenticatedAdminRoute
   '/api/v1/extract': typeof ApiV1ExtractRoute
   '/api/v1/invoices': typeof ApiV1InvoicesRoute
   '/api/v1/usage/current': typeof ApiV1UsageCurrentRoute
@@ -103,33 +109,34 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/admin'
     | '/api-test'
     | '/auth'
     | '/extract'
     | '/upload'
+    | '/admin'
     | '/api/v1/extract'
     | '/api/v1/invoices'
     | '/api/v1/usage/current'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/admin'
     | '/api-test'
     | '/auth'
     | '/extract'
     | '/upload'
+    | '/admin'
     | '/api/v1/extract'
     | '/api/v1/invoices'
     | '/api/v1/usage/current'
   id:
     | '__root__'
     | '/'
-    | '/admin'
+    | '/_authenticated'
     | '/api-test'
     | '/auth'
     | '/extract'
     | '/upload'
+    | '/_authenticated/admin'
     | '/api/v1/extract'
     | '/api/v1/invoices'
     | '/api/v1/usage/current'
@@ -137,7 +144,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AdminRoute: typeof AdminRoute
+  AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   ApiTestRoute: typeof ApiTestRoute
   AuthRoute: typeof AuthRoute
   ExtractRoute: typeof ExtractRoute
@@ -177,11 +184,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiTestRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/admin': {
-      id: '/admin'
-      path: '/admin'
-      fullPath: '/admin'
-      preLoaderRoute: typeof AdminRouteImport
+    '/_authenticated': {
+      id: '/_authenticated'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof AuthenticatedRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -190,6 +197,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/admin': {
+      id: '/_authenticated/admin'
+      path: '/admin'
+      fullPath: '/admin'
+      preLoaderRoute: typeof AuthenticatedAdminRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
     }
     '/api/v1/invoices': {
       id: '/api/v1/invoices'
@@ -215,9 +229,20 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AuthenticatedRouteRouteChildren {
+  AuthenticatedAdminRoute: typeof AuthenticatedAdminRoute
+}
+
+const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+  AuthenticatedAdminRoute: AuthenticatedAdminRoute,
+}
+
+const AuthenticatedRouteRouteWithChildren =
+  AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AdminRoute: AdminRoute,
+  AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   ApiTestRoute: ApiTestRoute,
   AuthRoute: AuthRoute,
   ExtractRoute: ExtractRoute,

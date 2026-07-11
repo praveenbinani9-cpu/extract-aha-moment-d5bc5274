@@ -23,7 +23,7 @@ import {
 import { toast } from "sonner";
 import { Copy, KeyRound, Power, PowerOff, Plus } from "lucide-react";
 
-export const Route = createFileRoute("/admin")({
+export const Route = createFileRoute("/_authenticated/admin")({
   head: () => ({ meta: [{ title: "Admin · DocExtract AI" }] }),
   component: AdminPage,
 });
