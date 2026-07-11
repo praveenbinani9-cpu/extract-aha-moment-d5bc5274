@@ -735,6 +735,18 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const rid = reqId();
   let lastErr = "";
 
+  // Reject oversized payloads up front. Cloudflare Workers can fail the
+  // outbound fetch with a bare "fetch failed" when the request body is very
+  // large, and a clear error is far more useful than a silent retry loop.
+  const PAYLOAD_LIMIT_BYTES = 18 * 1024 * 1024; // ~18MB serialized JSON
+  console.log("[vertex] request", { rid, payload_bytes: body.length, endpoint_host: host });
+  if (body.length > PAYLOAD_LIMIT_BYTES) {
+    throw new Error(
+      `Document too large for Vertex AI (${(body.length / 1024 / 1024).toFixed(1)}MB payload, limit ~18MB). ` +
+      `Please upload a smaller PDF or compress it first.`,
+    );
+  }
+
   // Total retry budget capped at ~45s so a saturated DSQ doesn't leave the
   // user staring at a spinner for minutes — they get a real error instead.
   const MAX_ATTEMPTS = 4;
