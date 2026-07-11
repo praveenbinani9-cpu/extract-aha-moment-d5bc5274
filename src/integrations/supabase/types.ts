@@ -44,8 +44,10 @@ export type Database = {
           created_at: string
           document_type: string | null
           id: string
+          meets_confidence_threshold: boolean | null
           overall_confidence: number | null
           page_count: number | null
+          provider_used: string | null
           result: Json
           tenant_id: string
         }
@@ -54,8 +56,10 @@ export type Database = {
           created_at?: string
           document_type?: string | null
           id?: string
+          meets_confidence_threshold?: boolean | null
           overall_confidence?: number | null
           page_count?: number | null
+          provider_used?: string | null
           result: Json
           tenant_id: string
         }
@@ -64,8 +68,10 @@ export type Database = {
           created_at?: string
           document_type?: string | null
           id?: string
+          meets_confidence_threshold?: boolean | null
           overall_confidence?: number | null
           page_count?: number | null
+          provider_used?: string | null
           result?: Json
           tenant_id?: string
         }
