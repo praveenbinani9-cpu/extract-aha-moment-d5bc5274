@@ -10,7 +10,7 @@
 | Animations | Framer Motion |
 | Server logic | TanStack `createServerFn` + server routes under `src/routes/api/` |
 | Database / Auth / Storage | Lovable Cloud (managed Postgres + RLS) |
-| LLM providers | **Groq** (`meta-llama/llama-4-scout-17b-16e-instruct`) primary; Gemini fallback |
+| LLM providers | **Groq** (`meta-llama/llama-4-scout-17b-16e-instruct`) primary for images; **Google Gemini** (`gemini-2.5-flash`) via direct Google API for PDFs and low-confidence cascade / hard-failure fallback |
 | PDF rendering (client) | `pdfjs-dist` |
 | Deployment target | Cloudflare Workers (edge) via TanStack Start adapter |
 
@@ -244,24 +244,35 @@ Visual pipeline stages (`Scan → Read → Validate → Extract → JSON`) are d
 
 | Var | Purpose |
 |---|---|
-| `GROQ_API_KEY` | Primary LLM provider |
-| `GEMINI_API_KEY` | Fallback / cross-check provider |
+| `GROQ_API_KEY` | Primary LLM provider (images) — direct call to `api.groq.com` |
+| `GOOGLE_API_KEY` | Google Gemini API key — direct call to `generativelanguage.googleapis.com` (used for PDFs and confidence cascade / hard-failure fallback) |
 | Lovable Cloud vars | Auto-injected (`SUPABASE_URL`, publishable + secret keys) |
 
-All are read **inside** server-function handlers, never at module scope.
+All are read **inside** server-function handlers, never at module scope. Enable the **Generative Language API** on the Google Cloud project that owns `GOOGLE_API_KEY` and ensure billing is active — Gemini rejects unbilled projects.
 
 ---
 
-## 9. Performance & Cost Notes
+## 9. Provider Cascade & Fallback
+
+- **Images:** Groq is called first. If `overall_confidence >= 0.95`, that result is used. Otherwise Gemini is called on the same image(s) and the higher-confidence result wins; near-ties (within 0.02) prefer Groq to save cost.
+- **PDFs:** Gemini only. Groq's vision model cannot read raw PDFs and no server-side rasterizer runs in this environment.
+- **Hard-failure fallback:** if Groq fails all 4 retries, the request falls back to Gemini. If Gemini fails all retries for a PDF, the request returns `502` — no fallback is possible.
+- Every fallback and cascade decision is logged with `{ rid, provider_used, fallback, reason, overall_confidence }`.
+- Each call carries an independent 4-attempt exponential backoff with structured retry logs (`rid`, `attempt`, `status`, `wait_ms`).
+- The extraction response and the `extractions` row both include `provider_used` (`"groq" | "gemini"`) and `meets_confidence_threshold` (boolean, `overall_confidence >= 0.95`).
+
+---
+
+## 10. Performance & Cost Notes
 
 - Multi-image extraction is **sequential**, not parallel — Groq's TPM (tokens-per-minute) limit on Llama-4-Scout is 30 000; parallel calls trip 429 immediately on 3+ page invoices.
 - PDF pages are downscaled client-side (1200px wide cap, JPEG 0.85) — typically 60–80 KB per page vs. 500 KB+ for full-res PNG.
-- `verifyCriticalFields` (2nd LLM pass) is skipped for multi-image jobs to halve token spend.
-- Retry budget per call: 4 attempts, max ~30s backoff each → worst-case ~2 min per page before failing 502.
+- Gemini is only invoked when actually needed (low Groq confidence or hard failure) to avoid doubling cost and latency on every request.
+- Retry budget per provider call: 4 attempts, max ~30s backoff each → worst-case ~2 min per page before failing 502.
 
 ---
 
-## 10. Extending the System
+## 11. Extending the System
 
 | Add a new document type | Update the system prompt in `extract-core.server.ts` + extend the Zod schema + add a `document_type` enum value in the prompt's allowed list |
 | Add a new validator | Write a function `validateX(doc): doc`, chain it inside `postProcess` |
@@ -271,7 +282,7 @@ All are read **inside** server-function handlers, never at module scope.
 
 ---
 
-## 11. Known Limitations
+## 12. Known Limitations
 
 - Groq Llama-4-Scout free tier: 30 000 TPM — heavy PDF (8 pages × ~3 KB tokens) may queue
 - `pdfjs-dist` runs in browser only — cannot extract from PDF server-side; the client must rasterize first

@@ -225,10 +225,9 @@ export const Route = createFileRoute("/api/v1/extract")({
           primary && typeof primary["document_type"] === "string"
             ? (primary["document_type"] as string)
             : null;
-        const overall_confidence =
-          primary && typeof primary["overall_confidence"] === "number"
-            ? (primary["overall_confidence"] as number)
-            : null;
+        const overall_confidence = result.overall_confidence;
+        const provider_used = result.provider_used;
+        const meets_confidence_threshold = result.meets_confidence_threshold;
         const docCount = documentsArr ? documentsArr.length : images.length;
 
         const { data: inserted, error: insertErr } = await supabaseAdmin
@@ -239,6 +238,8 @@ export const Route = createFileRoute("/api/v1/extract")({
             overall_confidence,
             page_count: docCount,
             billed_pages: billedPages,
+            provider_used,
+            meets_confidence_threshold,
             result: (parsedJson ?? {}) as never,
           } as never)
           .select("id, created_at")
@@ -269,10 +270,12 @@ export const Route = createFileRoute("/api/v1/extract")({
           created_at: inserted?.created_at ?? null,
           document_type,
           overall_confidence,
+          provider_used,
+          meets_confidence_threshold,
           billed_pages: billedPages,
           data: parsedJson,
         });
       },
     },
   },
-});       
+});
