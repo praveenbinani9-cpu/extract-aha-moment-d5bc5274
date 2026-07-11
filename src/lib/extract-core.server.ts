@@ -62,6 +62,14 @@ Schema:
   "line_items": [
     { "sr_no": number|null, "description": string, "hsn_sac": string|null, "quantity": number|null, "unit": string|null, "rate": number|null, "discount": number|null, "taxable_amount": number|null, "tax_rate": number|null, "cgst_rate": number|null, "cgst": number|null, "sgst_rate": number|null, "sgst": number|null, "igst_rate": number|null, "igst": number|null, "cess_rate": number|null, "cess": number|null, "amount": number|null }
   ],
+
+# Per-line tax amounts (CRITICAL — do NOT fabricate)
+- Per-line cgst / sgst / igst / cess RUPEE amounts must ONLY be populated when a rupee figure for that specific line is visibly printed in the line-items table on the document.
+- If the line-items table shows only a GST rate (e.g. "5%", "18%") for each row but does NOT print a per-line tax amount column, return null for that row's cgst / sgst / igst / cess amount fields. Populate only cgst_rate / sgst_rate / igst_rate / cess_rate in that case.
+- Never compute a per-line tax amount from taxable_amount × rate.
+- Never split, copy, or distribute the invoice-level total tax (from the footer/totals block) onto line items.
+- The invoice-level totals.cgst / totals.sgst / totals.igst / totals.total_tax must still be extracted from the footer/totals block as printed — that is independent from per-line amounts.
+
   "totals": { "subtotal": number|null, "total_discount": number|null, "taxable_amount": number|null, "cgst": number|null, "sgst": number|null, "igst": number|null, "cess": number|null, "total_tax": number|null, "tcs": number|null, "tds": number|null, "freight_charges": number|null, "other_charges": number|null, "round_off": number|null, "grand_total": number|null, "amount_in_words": string|null, "currency": string|null },
   "payment_terms": { "payment_mode": string|null, "due_date": string|null, "due_days": number|null, "interest_rate_percent": number|null, "advance_received": number|null } | null,
   "bank_details": { "bank_name": string|null, "account_number": string|null, "ifsc_code": string|null, "account_holder_name": string|null, "branch": string|null } | null,
@@ -411,6 +419,54 @@ function applyGstinValidation(parsed: unknown): unknown {
     }
   }
   validation.line_items_amount_verified = allItemsOk;
+
+  // Detect fabricated per-line tax amounts (model inventing values when only
+  // a rate was printed per line). Two heuristics:
+  //   (a) any single line item's tax equals the entire invoice total_tax
+  //   (b) all line items have identical non-null tax amount AND identical rate
+  //       AND their sum does not reconcile to totals.total_tax within tolerance
+  // Also add a reconciliation warning when sum(line taxes) ≠ totals.total_tax
+  // and no line item was left null (meaning the model claimed all were printed).
+  if (Array.isArray(root.line_items) && root.line_items.length > 0 && totals) {
+    const rows = root.line_items.map((it) => toObject(it)).filter((r): r is ExtractedObject => !!r);
+    const perLineTax = (r: ExtractedObject) =>
+      positiveNumber(r.cgst) + positiveNumber(r.sgst) + positiveNumber(r.igst);
+    const hasAnyLineTax = (r: ExtractedObject) =>
+      toNumber(r.cgst) !== null || toNumber(r.sgst) !== null || toNumber(r.igst) !== null;
+    const totalTaxPrinted = toNumber(totals.total_tax);
+    const totalTaxComputedFromTotals =
+      positiveNumber(totals.cgst) + positiveNumber(totals.sgst) + positiveNumber(totals.igst);
+    const invoiceTotalTax = totalTaxPrinted ?? (totalTaxComputedFromTotals > 0 ? totalTaxComputedFromTotals : null);
+
+    const rowsWithTax = rows.filter(hasAnyLineTax);
+    if (rowsWithTax.length > 0 && invoiceTotalTax !== null && invoiceTotalTax > 0) {
+      // (a) single row equals entire invoice tax
+      const suspicious = rowsWithTax.some((r) => Math.abs(perLineTax(r) - invoiceTotalTax) < 0.5);
+      if (suspicious && rows.length > 1) {
+        pushWarn("Line-item tax amounts appear estimated, not printed — verify against source document");
+      }
+
+      // (b) uniform rate + uniform amount across rows but sum ≠ total
+      const rates = rowsWithTax.map((r) =>
+        toNumber(r.tax_rate) ?? toNumber(r.igst_rate) ?? (positiveNumber(r.cgst_rate) + positiveNumber(r.sgst_rate)),
+      );
+      const amounts = rowsWithTax.map((r) => Number(perLineTax(r).toFixed(2)));
+      const uniformRate = rates.length > 1 && rates.every((v) => v !== null && v === rates[0]);
+      const uniformAmount = amounts.length > 1 && amounts.every((v) => v === amounts[0]);
+      const sumLineTax = amounts.reduce((a, b) => a + b, 0);
+      const tolerance = Math.max(1, Math.abs(invoiceTotalTax) * 0.01);
+      if (uniformRate && uniformAmount && Math.abs(sumLineTax - invoiceTotalTax) > tolerance) {
+        pushWarn("Line-item tax amounts appear estimated, not printed — verify against source document");
+      }
+
+      // Reconciliation: every row claims a printed tax, but they don't sum to total
+      const allRowsHaveTax = rows.every(hasAnyLineTax);
+      if (allRowsHaveTax && Math.abs(sumLineTax - invoiceTotalTax) > tolerance) {
+        pushWarn("Line-item tax amounts do not sum to invoice total tax");
+      }
+    }
+  }
+
 
   validation.warnings = warnings;
   root.validation = validation;
