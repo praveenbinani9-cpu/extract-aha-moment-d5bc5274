@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { requireAdmin } from "./require-admin";
 
 function genApiKey(): string {
   // 32 random bytes hex, prefixed
