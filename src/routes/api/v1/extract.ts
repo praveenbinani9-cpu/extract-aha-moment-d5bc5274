@@ -3,7 +3,7 @@ import { z } from "zod";
 
 // ── Schema for JSON body (base64 approach) ──────────────────────────────────
 const JsonBody = z.object({
-  images: z.array(z.string().min(20)).min(1).max(8),
+  images: z.array(z.string().min(20)).min(1).max(100),
   hint: z.string().max(500).optional(),
 });
 
