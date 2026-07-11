@@ -62,6 +62,14 @@ Schema:
   "line_items": [
     { "sr_no": number|null, "description": string, "hsn_sac": string|null, "quantity": number|null, "unit": string|null, "rate": number|null, "discount": number|null, "taxable_amount": number|null, "tax_rate": number|null, "cgst_rate": number|null, "cgst": number|null, "sgst_rate": number|null, "sgst": number|null, "igst_rate": number|null, "igst": number|null, "cess_rate": number|null, "cess": number|null, "amount": number|null }
   ],
+
+# Per-line tax amounts (CRITICAL — do NOT fabricate)
+- Per-line cgst / sgst / igst / cess RUPEE amounts must ONLY be populated when a rupee figure for that specific line is visibly printed in the line-items table on the document.
+- If the line-items table shows only a GST rate (e.g. "5%", "18%") for each row but does NOT print a per-line tax amount column, return null for that row's cgst / sgst / igst / cess amount fields. Populate only cgst_rate / sgst_rate / igst_rate / cess_rate in that case.
+- Never compute a per-line tax amount from taxable_amount × rate.
+- Never split, copy, or distribute the invoice-level total tax (from the footer/totals block) onto line items.
+- The invoice-level totals.cgst / totals.sgst / totals.igst / totals.total_tax must still be extracted from the footer/totals block as printed — that is independent from per-line amounts.
+
   "totals": { "subtotal": number|null, "total_discount": number|null, "taxable_amount": number|null, "cgst": number|null, "sgst": number|null, "igst": number|null, "cess": number|null, "total_tax": number|null, "tcs": number|null, "tds": number|null, "freight_charges": number|null, "other_charges": number|null, "round_off": number|null, "grand_total": number|null, "amount_in_words": string|null, "currency": string|null },
   "payment_terms": { "payment_mode": string|null, "due_date": string|null, "due_days": number|null, "interest_rate_percent": number|null, "advance_received": number|null } | null,
   "bank_details": { "bank_name": string|null, "account_number": string|null, "ifsc_code": string|null, "account_holder_name": string|null, "branch": string|null } | null,
