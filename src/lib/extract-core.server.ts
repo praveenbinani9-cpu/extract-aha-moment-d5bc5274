@@ -770,6 +770,9 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
           Authorization: `Bearer ${accessToken}`,
         },
         body,
+        // Abort before Cloudflare's 524 gateway timeout (~100s) so we
+        // surface a real error and can retry within budget.
+        signal: AbortSignal.timeout(25_000),
       });
     } catch (e) {
       // Network-level failure (DNS, TLS, ECONNRESET, request-body too large
