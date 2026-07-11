@@ -272,7 +272,7 @@ All are read **inside** server-function handlers, never at module scope. Enable 
 
 ---
 
-## 10. Extending the System
+## 11. Extending the System
 
 | Add a new document type | Update the system prompt in `extract-core.server.ts` + extend the Zod schema + add a `document_type` enum value in the prompt's allowed list |
 | Add a new validator | Write a function `validateX(doc): doc`, chain it inside `postProcess` |
