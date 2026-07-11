@@ -656,11 +656,94 @@ function getOverallConfidence(parsed: unknown): number {
 const CONFIDENCE_THRESHOLD = 0.95;
 const TIE_MARGIN = 0.02;
 
+const CRITICAL_FIELDS = [
+  { key: "invoice_number", get: (d: ExtractedObject) => d.document_number, pfc: "invoice_number" },
+  { key: "invoice_date", get: (d: ExtractedObject) => d.document_date, pfc: "invoice_date" },
+  { key: "seller_gstin", get: (d: ExtractedObject) => toObject(d.seller)?.gstin, pfc: "seller_gstin" },
+  { key: "buyer_gstin", get: (d: ExtractedObject) => toObject(d.buyer)?.gstin, pfc: "buyer_gstin" },
+  { key: "grand_total", get: (d: ExtractedObject) => toObject(d.totals)?.grand_total, pfc: "grand_total" },
+] as const;
+
+function normStr(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string") return v.trim().toUpperCase().replace(/\s+/g, "");
+  if (typeof v === "number") return String(v);
+  return null;
+}
+
+function fieldsAgree(key: string, a: unknown, b: unknown): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  if (key === "grand_total") {
+    const na = toNumber(a);
+    const nb = toNumber(b);
+    if (na === null || nb === null) return false;
+    return Math.abs(na - nb) < 0.01;
+  }
+  const sa = normStr(a);
+  const sb = normStr(b);
+  return sa !== null && sb !== null && sa === sb;
+}
+
+// Cross-check critical fields between winning and losing cascade results.
+// Reuses in-memory results — makes NO additional API calls.
+function crossCheckCritical(
+  winner: unknown,
+  loser: unknown,
+  winnerProvider: "groq" | "gemini",
+  loserProvider: "groq" | "gemini",
+  rid: string,
+): void {
+  const w = toObject(winner);
+  const l = toObject(loser);
+  if (!w || !l) return;
+  // Skip multi-document envelopes — ambiguous which doc pairs to which.
+  if (Array.isArray(w.documents) || Array.isArray(l.documents)) return;
+
+  const pfc = toObject(w.per_field_confidence) ?? {};
+  const validation = toObject(w.validation) ?? {};
+  const warnings: string[] = Array.isArray(validation.warnings) ? (validation.warnings as string[]) : [];
+
+  for (const f of CRITICAL_FIELDS) {
+    const wv = f.get(w);
+    const lv = f.get(l);
+    if ((wv === null || wv === undefined) && (lv === null || lv === undefined)) continue;
+    const current = toNumber(pfc[f.pfc]);
+    if (fieldsAgree(f.key, wv, lv)) {
+      const boosted = current === null ? 0.99 : Math.min(0.99, current + 0.05);
+      pfc[f.pfc] = Number(boosted.toFixed(2));
+    } else {
+      const capped = current === null ? 0.7 : Math.min(current, 0.7);
+      pfc[f.pfc] = Number(capped.toFixed(2));
+      const msg = `Critical field "${f.key}" disagreed between Groq and Gemini — confidence lowered`;
+      if (!warnings.includes(msg)) warnings.push(msg);
+      console.warn("[cross-check] disagreement", {
+        rid,
+        field: f.key,
+        kept_provider: winnerProvider,
+        kept_value: wv ?? null,
+        other_provider: loserProvider,
+        other_value: lv ?? null,
+      });
+    }
+  }
+
+  w.per_field_confidence = pfc;
+  validation.warnings = warnings;
+  w.validation = validation;
+
+  // Recompute overall_confidence from the updated per_field_confidence.
+  const vals = Object.values(pfc).map((v) => toNumber(v)).filter((v): v is number => v !== null);
+  if (vals.length > 0) {
+    w.overall_confidence = Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2));
+  }
+}
+
 export type ExtractCoreOutput = ExtractCoreResult & {
   provider_used: "groq" | "gemini";
   overall_confidence: number;
   meets_confidence_threshold: boolean;
 };
+
 
 async function runGroqOnImages(images: string[], hint?: string): Promise<unknown> {
   if (images.length > 1) {
