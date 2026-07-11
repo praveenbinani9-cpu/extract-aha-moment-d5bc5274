@@ -735,9 +735,12 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const rid = reqId();
   let lastErr = "";
 
-  // Longer/more attempts to smooth over Vertex DSQ (dynamic shared quota)
-  // 429 spikes in constrained regions like asia-south1.
-  const MAX_ATTEMPTS = 6;
+  // Total retry budget capped at ~45s so a saturated DSQ doesn't leave the
+  // user staring at a spinner for minutes — they get a real error instead.
+  const MAX_ATTEMPTS = 4;
+  const MAX_TOTAL_WAIT_MS = 45_000;
+  const MAX_SINGLE_WAIT_MS = 12_000;
+  const startedAt = Date.now();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let accessToken: string;
     try {
@@ -782,17 +785,24 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     }
 
     // Exponential backoff + jitter, honoring Retry-After / "try again in Ns"
-    // hints. Caps at 60s so a burst of tenants sharing DSQ don't all retry
-    // in lockstep.
+    // hints, but bounded so total wall time stays under ~45s.
     let waitMs = 0;
     const retryAfter = res.headers.get("retry-after");
     if (retryAfter) waitMs = Math.ceil(parseFloat(retryAfter) * 1000);
     const m = text.match(/try again in ([\d.]+)s/i);
     if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
-    if (!waitMs) waitMs = Math.min(60000, 2000 * Math.pow(2, attempt)); // 2s, 4s, 8s, 16s, 32s, 60s
-    const jitter = Math.floor(Math.random() * 1000);
-    waitMs = Math.min(waitMs + jitter, 60000);
-    console.warn("[vertex] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
+    if (!waitMs) waitMs = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
+    const jitter = Math.floor(Math.random() * 500);
+    waitMs = Math.min(waitMs + jitter, MAX_SINGLE_WAIT_MS);
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed + waitMs > MAX_TOTAL_WAIT_MS) {
+      console.error("[vertex] retry budget exhausted", {
+        rid, attempt, status: res.status, elapsed_ms: elapsed, error: lastErr,
+      });
+      break;
+    }
+    console.warn("[vertex] retry", { rid, attempt, status: res.status, wait_ms: waitMs, elapsed_ms: elapsed });
     await new Promise((r) => setTimeout(r, waitMs));
   }
   throw new Error(lastErr || "Vertex AI Gemini call failed");
