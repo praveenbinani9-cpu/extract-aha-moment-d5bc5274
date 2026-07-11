@@ -282,7 +282,7 @@ All are read **inside** server-function handlers, never at module scope. Enable 
 
 ---
 
-## 11. Known Limitations
+## 12. Known Limitations
 
 - Groq Llama-4-Scout free tier: 30 000 TPM — heavy PDF (8 pages × ~3 KB tokens) may queue
 - `pdfjs-dist` runs in browser only — cannot extract from PDF server-side; the client must rasterize first
