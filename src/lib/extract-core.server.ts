@@ -846,15 +846,25 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
       try {
         const gemParsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
         const gemConfidence = getOverallConfidence(gemParsed);
+        let loserParsed: unknown;
+        let loserProvider: "groq" | "gemini";
         if (gemConfidence > groqConfidence + TIE_MARGIN) {
           parsed = gemParsed;
           provider_used = "gemini";
           overall_confidence = gemConfidence;
+          loserParsed = groqParsed;
+          loserProvider = "groq";
         } else {
           parsed = groqParsed;
           provider_used = "groq";
           overall_confidence = groqConfidence;
+          loserParsed = gemParsed;
+          loserProvider = "gemini";
         }
+        // Free cross-check: reuse the losing provider's already-fetched
+        // result to validate critical fields on the winner.
+        crossCheckCritical(parsed, loserParsed, provider_used, loserProvider, rid);
+        overall_confidence = getOverallConfidence(parsed);
         console.log("[extract] cascade result", {
           rid,
           provider_used,
@@ -862,7 +872,9 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
           reason: "low_groq_confidence",
           groq_confidence: groqConfidence,
           gemini_confidence: gemConfidence,
+          overall_confidence_after_crosscheck: overall_confidence,
         });
+
       } catch (gErr) {
         // Cascade Gemini call failed — keep the Groq result.
         console.error("[extract] Gemini cascade failed; keeping Groq result", {
