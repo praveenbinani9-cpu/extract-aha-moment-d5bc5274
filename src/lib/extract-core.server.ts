@@ -837,6 +837,55 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   throw new Error(lastErr || "Vertex AI Gemini call failed");
 }
 
+// Fallback: call Gemini via Lovable AI Gateway (separate quota pool from
+// direct Vertex AI). Used when Vertex 429s / auth fails / times out so PDF
+// extraction still succeeds. Uses OpenAI-compatible chat completions.
+async function callGeminiViaLovableGateway(images: string[], hint?: string): Promise<string> {
+  const apiKey = process.env.LOVABLE_API_KEY;
+  if (!apiKey) throw new Error("LOVABLE_API_KEY not configured (Lovable AI Gateway fallback unavailable)");
+
+  const content: Array<Record<string, unknown>> = [
+    {
+      type: "text",
+      text: `Extract structured data from this document.${hint ? " Hint: " + hint : ""} If multiple invoices/documents are present, return { "documents": [...] }. Return JSON only.`,
+    },
+  ];
+  for (const url of images) {
+    const dataUri = url.startsWith("data:") ? url : normalizeImageUrl(url);
+    content.push({ type: "image_url", image_url: { url: dataUri } });
+  }
+
+  const rid = reqId();
+  const body = JSON.stringify({
+    model: "google/gemini-2.5-flash",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content },
+    ],
+    temperature: 0,
+    response_format: { type: "json_object" },
+  });
+  console.log("[lovable-ai] request", { rid, payload_bytes: body.length });
+
+  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Lovable-API-Key": apiKey,
+    },
+    body,
+    signal: AbortSignal.timeout(45_000),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Lovable AI Gateway error ${res.status}: ${text.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return json.choices?.[0]?.message?.content ?? "{}";
+}
+
 function parseJsonLoose(raw: string): unknown {
   try { return JSON.parse(raw); } catch { /* fallthrough */ }
   const m = raw.match(/\{[\s\S]*\}/);
@@ -1033,20 +1082,27 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   let overall_confidence = 0;
 
   if (hasPdf) {
-    // PDFs: Gemini only — Groq's vision model cannot read raw PDFs and
-    // no server-side rasterizer runs in this environment.
+    // PDFs: try Vertex AI first, fall back to Lovable AI Gateway (separate
+    // quota pool) on any Vertex failure so a 429 / timeout / auth issue
+    // does not block extraction.
     try {
       parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
       provider_used = "gemini";
       overall_confidence = getOverallConfidence(parsed);
       console.log("[extract]", { rid, provider_used, fallback: false, hasPdf, overall_confidence });
-    } catch (err) {
-      console.error("[extract] Gemini failed for PDF; no fallback available", {
-        rid,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      throw new Error("PDF extraction failed via Gemini (Groq cannot read PDFs): " +
-        (err instanceof Error ? err.message : String(err)));
+    } catch (vertexErr) {
+      const vertexMsg = vertexErr instanceof Error ? vertexErr.message : String(vertexErr);
+      console.warn("[extract] Vertex failed for PDF; trying Lovable AI Gateway", { rid, error: vertexMsg });
+      try {
+        parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
+        provider_used = "gemini";
+        overall_confidence = getOverallConfidence(parsed);
+        console.log("[extract]", { rid, provider_used, fallback: true, via: "lovable-ai", hasPdf, overall_confidence });
+      } catch (gwErr) {
+        const gwMsg = gwErr instanceof Error ? gwErr.message : String(gwErr);
+        console.error("[extract] Both Vertex and Lovable AI Gateway failed for PDF", { rid, vertex: vertexMsg, gateway: gwMsg });
+        throw new Error(`PDF extraction failed. Vertex: ${vertexMsg}. Gateway fallback: ${gwMsg}`);
+      }
     }
   } else {
     // Images: Groq first. Cascade to Gemini only when confidence is low
