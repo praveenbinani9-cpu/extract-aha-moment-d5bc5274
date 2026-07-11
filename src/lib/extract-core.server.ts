@@ -564,11 +564,112 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
   throw new Error(lastErr || "Groq API failed");
 }
 
-// Direct Google Gemini API call — uses GOOGLE_API_KEY (not the Lovable
-// gateway). Supports both PDFs and images via inline_data parts.
+// ============================================================================
+// Vertex AI (Google Cloud) Gemini call
+// ============================================================================
+// Uses a service account JWT (signed with Web Crypto — works in Cloudflare
+// Workers) to obtain a short-lived OAuth access token, then calls the Vertex
+// AI generateContent endpoint. Tokens are cached in-memory for ~50 minutes.
+// Required secrets: GCP_PROJECT_ID, GCP_LOCATION, GCP_SERVICE_ACCOUNT_JSON.
+
+interface ServiceAccountKey {
+  client_email: string;
+  private_key: string;
+  token_uri?: string;
+}
+
+let cachedVertexToken: { token: string; expiresAt: number } | null = null;
+
+function b64urlEncode(input: ArrayBuffer | Uint8Array | string): string {
+  let bytes: Uint8Array;
+  if (typeof input === "string") bytes = new TextEncoder().encode(input);
+  else if (input instanceof Uint8Array) bytes = input;
+  else bytes = new Uint8Array(input);
+  let str = "";
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function pemToArrayBuffer(pem: string): ArrayBuffer {
+  const cleaned = pem
+    .replace(/-----BEGIN [^-]+-----/g, "")
+    .replace(/-----END [^-]+-----/g, "")
+    .replace(/\s+/g, "");
+  const binary = atob(cleaned);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function getVertexAccessToken(): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedVertexToken && cachedVertexToken.expiresAt - 60 > now) {
+    return cachedVertexToken.token;
+  }
+
+  const rawJson = process.env.GCP_SERVICE_ACCOUNT_JSON;
+  if (!rawJson) throw new Error("GCP_SERVICE_ACCOUNT_JSON is not configured");
+
+  let sa: ServiceAccountKey;
+  try {
+    sa = JSON.parse(rawJson) as ServiceAccountKey;
+  } catch {
+    throw new Error("GCP_SERVICE_ACCOUNT_JSON is not valid JSON");
+  }
+  if (!sa.client_email || !sa.private_key) {
+    throw new Error("GCP_SERVICE_ACCOUNT_JSON missing client_email or private_key");
+  }
+
+  const tokenUri = sa.token_uri || "https://oauth2.googleapis.com/token";
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = {
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    aud: tokenUri,
+    exp: now + 3600,
+    iat: now,
+  };
+
+  const signingInput = `${b64urlEncode(JSON.stringify(header))}.${b64urlEncode(JSON.stringify(payload))}`;
+  const keyBuffer = pemToArrayBuffer(sa.private_key);
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBuffer,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(signingInput),
+  );
+  const jwt = `${signingInput}.${b64urlEncode(signature)}`;
+
+  const tokenRes = await fetch(tokenUri, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${encodeURIComponent(jwt)}`,
+  });
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    throw new Error(`Vertex AI token exchange failed ${tokenRes.status}: ${errText.slice(0, 500)}`);
+  }
+  const tokenJson = (await tokenRes.json()) as { access_token?: string; expires_in?: number };
+  if (!tokenJson.access_token) throw new Error("Vertex AI token exchange returned no access_token");
+
+  cachedVertexToken = {
+    token: tokenJson.access_token,
+    expiresAt: now + (tokenJson.expires_in ?? 3600),
+  };
+  return cachedVertexToken.token;
+}
+
+// Vertex AI Gemini call. Supports both PDFs and images via inlineData parts.
 async function callGeminiDirect(images: string[], hint?: string): Promise<string> {
-  const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) throw new Error("GOOGLE_API_KEY is not configured");
+  const projectId = process.env.GCP_PROJECT_ID;
+  const location = process.env.GCP_LOCATION || "us-central1";
+  if (!projectId) throw new Error("GCP_PROJECT_ID is not configured");
 
   const parts: Array<Record<string, unknown>> = [
     {
@@ -582,7 +683,7 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     if (!match) continue;
     const mimeType = match[1];
     const data = match[2];
-    parts.push({ inline_data: { mime_type: mimeType, data } });
+    parts.push({ inlineData: { mimeType, data } });
   }
 
   const body = JSON.stringify({
@@ -595,14 +696,27 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     },
   });
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const host = location === "global"
+    ? "aiplatform.googleapis.com"
+    : `${location}-aiplatform.googleapis.com`;
+  const endpoint = `https://${host}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/publishers/google/models/gemini-2.5-flash:generateContent`;
   const rid = reqId();
   let lastErr = "";
 
   for (let attempt = 0; attempt < 4; attempt++) {
+    let accessToken: string;
+    try {
+      accessToken = await getVertexAccessToken();
+    } catch (e) {
+      throw new Error(`Vertex AI auth failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     const res = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
       body,
     });
 
@@ -617,9 +731,18 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     }
 
     const text = await res.text();
-    lastErr = `Gemini API error ${res.status}: ${text.slice(0, 500)}`;
+    lastErr = `Vertex AI error ${res.status}: ${text.slice(0, 500)}`;
+
+    // Auth issue — bust the token cache and retry once immediately.
+    if (res.status === 401 || res.status === 403) {
+      cachedVertexToken = null;
+      console.error("[vertex]", { rid, attempt, status: res.status, error: lastErr });
+      if (attempt === 0) continue;
+      break;
+    }
+
     if (res.status !== 429 && res.status < 500) {
-      console.error("[gemini]", { rid, attempt, status: res.status, error: lastErr });
+      console.error("[vertex]", { rid, attempt, status: res.status, error: lastErr });
       break;
     }
 
@@ -630,10 +753,10 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
     if (!waitMs) waitMs = 2000 * (attempt + 1);
     waitMs = Math.min(waitMs + 500, 30000);
-    console.warn("[gemini] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
+    console.warn("[vertex] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
     await new Promise((r) => setTimeout(r, waitMs));
   }
-  throw new Error(lastErr || "Gemini API failed");
+  throw new Error(lastErr || "Vertex AI Gemini call failed");
 }
 
 function parseJsonLoose(raw: string): unknown {
