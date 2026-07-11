@@ -420,6 +420,54 @@ function applyGstinValidation(parsed: unknown): unknown {
   }
   validation.line_items_amount_verified = allItemsOk;
 
+  // Detect fabricated per-line tax amounts (model inventing values when only
+  // a rate was printed per line). Two heuristics:
+  //   (a) any single line item's tax equals the entire invoice total_tax
+  //   (b) all line items have identical non-null tax amount AND identical rate
+  //       AND their sum does not reconcile to totals.total_tax within tolerance
+  // Also add a reconciliation warning when sum(line taxes) ≠ totals.total_tax
+  // and no line item was left null (meaning the model claimed all were printed).
+  if (Array.isArray(root.line_items) && root.line_items.length > 0 && totals) {
+    const rows = root.line_items.map((it) => toObject(it)).filter((r): r is ExtractedObject => !!r);
+    const perLineTax = (r: ExtractedObject) =>
+      positiveNumber(r.cgst) + positiveNumber(r.sgst) + positiveNumber(r.igst);
+    const hasAnyLineTax = (r: ExtractedObject) =>
+      toNumber(r.cgst) !== null || toNumber(r.sgst) !== null || toNumber(r.igst) !== null;
+    const totalTaxPrinted = toNumber(totals.total_tax);
+    const totalTaxComputedFromTotals =
+      positiveNumber(totals.cgst) + positiveNumber(totals.sgst) + positiveNumber(totals.igst);
+    const invoiceTotalTax = totalTaxPrinted ?? (totalTaxComputedFromTotals > 0 ? totalTaxComputedFromTotals : null);
+
+    const rowsWithTax = rows.filter(hasAnyLineTax);
+    if (rowsWithTax.length > 0 && invoiceTotalTax !== null && invoiceTotalTax > 0) {
+      // (a) single row equals entire invoice tax
+      const suspicious = rowsWithTax.some((r) => Math.abs(perLineTax(r) - invoiceTotalTax) < 0.5);
+      if (suspicious && rows.length > 1) {
+        pushWarn("Line-item tax amounts appear estimated, not printed — verify against source document");
+      }
+
+      // (b) uniform rate + uniform amount across rows but sum ≠ total
+      const rates = rowsWithTax.map((r) =>
+        toNumber(r.tax_rate) ?? toNumber(r.igst_rate) ?? (positiveNumber(r.cgst_rate) + positiveNumber(r.sgst_rate)),
+      );
+      const amounts = rowsWithTax.map((r) => Number(perLineTax(r).toFixed(2)));
+      const uniformRate = rates.length > 1 && rates.every((v) => v !== null && v === rates[0]);
+      const uniformAmount = amounts.length > 1 && amounts.every((v) => v === amounts[0]);
+      const sumLineTax = amounts.reduce((a, b) => a + b, 0);
+      const tolerance = Math.max(1, Math.abs(invoiceTotalTax) * 0.01);
+      if (uniformRate && uniformAmount && Math.abs(sumLineTax - invoiceTotalTax) > tolerance) {
+        pushWarn("Line-item tax amounts appear estimated, not printed — verify against source document");
+      }
+
+      // Reconciliation: every row claims a printed tax, but they don't sum to total
+      const allRowsHaveTax = rows.every(hasAnyLineTax);
+      if (allRowsHaveTax && Math.abs(sumLineTax - invoiceTotalTax) > tolerance) {
+        pushWarn("Line-item tax amounts do not sum to invoice total tax");
+      }
+    }
+  }
+
+
   validation.warnings = warnings;
   root.validation = validation;
 
