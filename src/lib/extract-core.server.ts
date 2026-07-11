@@ -610,11 +610,43 @@ async function getVertexAccessToken(): Promise<string> {
   const rawJson = process.env.GCP_SERVICE_ACCOUNT_JSON;
   if (!rawJson) throw new Error("GCP_SERVICE_ACCOUNT_JSON is not configured");
 
-  let sa: ServiceAccountKey;
-  try {
-    sa = JSON.parse(rawJson) as ServiceAccountKey;
-  } catch {
-    throw new Error("GCP_SERVICE_ACCOUNT_JSON is not valid JSON");
+  // Accept either raw JSON or base64-encoded JSON. Also strip UTF-8 BOM and
+  // smart quotes that sneak in when the value is copied from a rich-text editor.
+  const tryParse = (s: string): ServiceAccountKey | null => {
+    try {
+      return JSON.parse(s) as ServiceAccountKey;
+    } catch {
+      return null;
+    }
+  };
+
+  let cleaned = rawJson.trim().replace(/^\uFEFF/, "");
+  // Convert typographic quotes back to plain quotes (only if JSON parse fails on raw).
+  const withStraightQuotes = cleaned
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'");
+
+  let sa: ServiceAccountKey | null =
+    tryParse(cleaned) ?? tryParse(withStraightQuotes);
+
+  // Fallback: value may be base64-encoded JSON.
+  if (!sa && /^[A-Za-z0-9+/=\s]+$/.test(cleaned) && cleaned.length > 100) {
+    try {
+      const decoded = atob(cleaned.replace(/\s+/g, ""));
+      sa = tryParse(decoded);
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!sa) {
+    const preview = cleaned.slice(0, 40).replace(/[\r\n]+/g, "\\n");
+    const looksLikeBase64 = /^[A-Za-z0-9+/=]+$/.test(cleaned.slice(0, 40));
+    throw new Error(
+      `GCP_SERVICE_ACCOUNT_JSON is not valid JSON (starts with: "${preview}"..., ` +
+      `base64-shape: ${looksLikeBase64}). Paste the full service-account file contents ` +
+      `starting with { and ending with }, or a base64 encoding of it.`,
+    );
   }
   if (!sa.client_email || !sa.private_key) {
     throw new Error("GCP_SERVICE_ACCOUNT_JSON missing client_email or private_key");
