@@ -109,7 +109,7 @@ async function parseRequest(
     }
 
     if (files.length === 0) return { error: "No image files found in form data. Use field name 'images' or 'image'.", status: 400 };
-    if (files.length > 8)   return { error: "Maximum 8 images per request.", status: 400 };
+    if (files.length > 100)   return { error: "Maximum 100 images per request.", status: 400 };
 
     // Validate file types
     const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"];
