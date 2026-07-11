@@ -438,6 +438,14 @@ function isPdfDataUri(url: string): boolean {
   return url.startsWith("data:application/pdf");
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Provider calls
+// ────────────────────────────────────────────────────────────────────────────
+
+function reqId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
 async function callGroqVision(images: string[], hint?: string): Promise<string> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
@@ -466,6 +474,7 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
     ],
   });
 
+  const rid = reqId();
   let lastErr = "";
   for (let attempt = 0; attempt < 4; attempt++) {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -481,9 +490,11 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
 
     const text = await res.text();
     lastErr = `Groq API error ${res.status}: ${text.slice(0, 500)}`;
-    if (res.status !== 429 && res.status < 500) break;
+    if (res.status !== 429 && res.status < 500) {
+      console.error("[groq]", { rid, attempt, status: res.status, error: lastErr });
+      break;
+    }
 
-    // Parse retry delay from message ("try again in 12.848s") or Retry-After header.
     let waitMs = 0;
     const retryAfter = res.headers.get("retry-after");
     if (retryAfter) waitMs = Math.ceil(parseFloat(retryAfter) * 1000);
@@ -491,56 +502,82 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
     if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
     if (!waitMs) waitMs = 2000 * (attempt + 1);
     waitMs = Math.min(waitMs + 500, 30000);
+    console.warn("[groq] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
     await new Promise((r) => setTimeout(r, waitMs));
   }
   throw new Error(lastErr || "Groq API failed");
 }
 
-async function callGeminiPdf(images: string[], hint?: string): Promise<string> {
-  const apiKey = process.env.LOVABLE_API_KEY;
-  if (!apiKey) throw new Error("LOVABLE_API_KEY is not configured");
+// Direct Google Gemini API call — uses GOOGLE_API_KEY (not the Lovable
+// gateway). Supports both PDFs and images via inline_data parts.
+async function callGeminiDirect(images: string[], hint?: string): Promise<string> {
+  const apiKey = process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_API_KEY is not configured");
 
   const parts: Array<Record<string, unknown>> = [
     {
-      type: "text",
       text: `Extract structured data from this document.${hint ? " Hint: " + hint : ""} If multiple invoices/documents are present, return { "documents": [...] }. Return JSON only.`,
     },
   ];
 
   for (const url of images) {
     const dataUri = url.startsWith("data:") ? url : normalizeImageUrl(url);
-    if (dataUri.startsWith("data:application/pdf")) {
-      parts.push({
-        type: "file",
-        file: { filename: "document.pdf", file_data: dataUri },
-      });
-    } else {
-      parts.push({ type: "image_url", image_url: { url: dataUri } });
-    }
+    const match = dataUri.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) continue;
+    const mimeType = match[1];
+    const data = match[2];
+    parts.push({ inline_data: { mime_type: mimeType, data } });
   }
 
-  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash",
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: "user", parts }],
+    generationConfig: {
       temperature: 0,
-      top_p: 1,
-      seed: 7,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: parts },
-      ],
-    }),
+      topP: 1,
+      responseMimeType: "application/json",
+    },
   });
 
-  if (!res.ok) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const rid = reqId();
+  let lastErr = "";
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+
+    if (res.ok) {
+      const json = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      const text = json.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text ?? "")
+        .join("") ?? "";
+      return text || "{}";
+    }
+
     const text = await res.text();
-    throw new Error(`AI gateway error ${res.status}: ${text.slice(0, 500)}`);
+    lastErr = `Gemini API error ${res.status}: ${text.slice(0, 500)}`;
+    if (res.status !== 429 && res.status < 500) {
+      console.error("[gemini]", { rid, attempt, status: res.status, error: lastErr });
+      break;
+    }
+
+    let waitMs = 0;
+    const retryAfter = res.headers.get("retry-after");
+    if (retryAfter) waitMs = Math.ceil(parseFloat(retryAfter) * 1000);
+    const m = text.match(/try again in ([\d.]+)s/i);
+    if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
+    if (!waitMs) waitMs = 2000 * (attempt + 1);
+    waitMs = Math.min(waitMs + 500, 30000);
+    console.warn("[gemini] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
+    await new Promise((r) => setTimeout(r, waitMs));
   }
-  const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-  return json.choices?.[0]?.message?.content ?? "{}";
+  throw new Error(lastErr || "Gemini API failed");
 }
 
 function parseJsonLoose(raw: string): unknown {
@@ -551,8 +588,6 @@ function parseJsonLoose(raw: string): unknown {
 }
 
 // Wrap seller/buyer GSTIN with { raw_value, normalized_value, is_valid }
-// WITHOUT changing the extracted string. The visible `gstin` field stays
-// as the model returned it. We expose a sibling `gstin_quality` block.
 function annotateGstinQuality(doc: ExtractedObject): void {
   for (const key of ["seller", "buyer"] as const) {
     const party = toObject(doc[key]);
@@ -568,7 +603,6 @@ function annotateGstinQuality(doc: ExtractedObject): void {
   }
 }
 
-// If invoice_number === invoice_date, lower confidence and null the number.
 function reconcileInvoiceNumberDate(doc: ExtractedObject, warnings: string[]): void {
   const num = typeof doc.document_number === "string" ? doc.document_number.trim() : null;
   const date = typeof doc.document_date === "string" ? doc.document_date.trim() : null;
@@ -585,87 +619,53 @@ function reconcileInvoiceNumberDate(doc: ExtractedObject, warnings: string[]): v
   }
 }
 
-// Compare critical fields between primary and verification runs.
-// On mismatch: keep the value from the run with higher per-field confidence
-// (default to primary) and lower the field confidence to ≤ 0.7.
-const CRITICAL_PATHS: Array<{ key: string; pfc: string; get: (d: ExtractedObject) => unknown; set: (d: ExtractedObject, v: unknown) => void }> = [
-  { key: "invoice_number", pfc: "invoice_number", get: (d) => d.document_number, set: (d, v) => { d.document_number = v as string | null; } },
-  { key: "invoice_date",   pfc: "invoice_date",   get: (d) => d.document_date,   set: (d, v) => { d.document_date = v as string | null; } },
-  { key: "seller_gstin",   pfc: "seller_gstin",   get: (d) => toObject(d.seller)?.gstin, set: (d, v) => { const s = toObject(d.seller); if (s) s.gstin = v as string | null; } },
-  { key: "buyer_gstin",    pfc: "buyer_gstin",    get: (d) => toObject(d.buyer)?.gstin,  set: (d, v) => { const b = toObject(d.buyer);  if (b) b.gstin = v as string | null; } },
-  { key: "grand_total",    pfc: "grand_total",    get: (d) => toObject(d.totals)?.grand_total, set: (d, v) => { const t = toObject(d.totals); if (t) t.grand_total = v as number | null; } },
-];
-
-function reconcileCriticalFields(primary: ExtractedObject, secondary: ExtractedObject | null, warnings: string[]): void {
-  if (!secondary) return;
-  const pfc = toObject(primary.per_field_confidence) ?? {};
-  const pfc2 = toObject(secondary.per_field_confidence) ?? {};
-  for (const f of CRITICAL_PATHS) {
-    const a = f.get(primary);
-    const b = f.get(secondary);
-    const same = JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-    if (same) {
-      // Boost confidence on match (cap at 0.99).
-      const c = toNumber(pfc[f.pfc]);
-      pfc[f.pfc] = c === null ? 0.95 : Math.min(0.99, Math.max(c, 0.95));
-    } else {
-      const ca = toNumber(pfc[f.pfc]) ?? 0;
-      const cb = toNumber(pfc2[f.pfc]) ?? 0;
-      if (cb > ca) f.set(primary, b);
-      pfc[f.pfc] = Math.min(ca, cb, 0.7);
-      warnings.push(`Critical field "${f.key}" disagreed across verification runs — confidence lowered`);
-    }
-  }
-  primary.per_field_confidence = pfc;
-}
-
-function postProcess(parsed: unknown, secondary: unknown | null): unknown {
+function postProcess(parsed: unknown): unknown {
   const root = toObject(parsed);
   if (!root) return parsed;
-  const sec = toObject(secondary);
-  const apply = (doc: ExtractedObject, secDoc: ExtractedObject | null) => {
+  const apply = (doc: ExtractedObject) => {
     const validation = toObject(doc.validation) ?? {};
     const warnings: string[] = Array.isArray(validation.warnings) ? (validation.warnings as string[]) : [];
     reconcileInvoiceNumberDate(doc, warnings);
-    reconcileCriticalFields(doc, secDoc, warnings);
     annotateGstinQuality(doc);
     validation.warnings = warnings;
     doc.validation = validation;
   };
   if (Array.isArray(root.documents)) {
-    const secDocs = sec && Array.isArray(sec.documents) ? (sec.documents as unknown[]) : [];
-    root.documents.forEach((doc, i) => {
+    root.documents.forEach((doc) => {
       const d = toObject(doc); if (!d) return;
-      apply(d, toObject(secDocs[i] ?? null));
+      apply(d);
     });
   } else {
-    apply(root, sec);
+    apply(root);
   }
   return root;
 }
 
-// Lightweight second pass that ONLY re-extracts critical fields, used to
-// detect cross-run instability. Reuses the same model/temperature/seed.
-async function verifyCriticalFields(images: string[], hasPdf: boolean, hint?: string): Promise<unknown | null> {
-  try {
-    const raw = hasPdf ? await callGeminiPdf(images, hint) : await callGroqVision(images, hint);
-    return normalizeResponse(parseJsonLoose(raw));
-  } catch {
-    return null;
+// Compute an overall confidence score for a parsed result.
+function getOverallConfidence(parsed: unknown): number {
+  const root = toObject(parsed);
+  if (!root) return 0;
+  if (Array.isArray(root.documents)) {
+    const vals = root.documents
+      .map((d) => toNumber(toObject(d)?.overall_confidence) ?? 0);
+    return vals.length ? Math.min(...vals) : 0;
   }
+  return toNumber(root.overall_confidence) ?? 0;
 }
 
-export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreResult> {
-  const hasPdf = images.some((url) => {
-    if (url.startsWith("data:")) return isPdfDataUri(url);
-    return detectMimeType(url) === "application/pdf";
-  });
+const CONFIDENCE_THRESHOLD = 0.95;
+const TIE_MARGIN = 0.02;
 
-  let parsed: unknown;
+export type ExtractCoreOutput = ExtractCoreResult & {
+  provider_used: "groq" | "gemini";
+  overall_confidence: number;
+  meets_confidence_threshold: boolean;
+};
 
-  if (!hasPdf && images.length > 1) {
+async function runGroqOnImages(images: string[], hint?: string): Promise<unknown> {
+  if (images.length > 1) {
     // Process each image independently to prevent cross-page contamination.
-    // Run sequentially to stay under provider TPM rate limits.
+    // Sequential to stay under provider TPM limits.
     const perImage: unknown[] = [];
     for (const img of images) {
       perImage.push(normalizeResponse(parseJsonLoose(await callGroqVision([img], hint))));
@@ -676,16 +676,134 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
       if (o && Array.isArray(o.documents)) docs.push(...o.documents);
       else if (o) docs.push(o);
     }
-    parsed = docs.length === 1 ? docs[0] : { documents: docs };
-    // Skip the consistency double-pass in multi-image mode to avoid TPM exhaustion.
-    parsed = postProcess(parsed, null);
+    return docs.length === 1 ? docs[0] : { documents: docs };
+  }
+  return normalizeResponse(parseJsonLoose(await callGroqVision(images, hint)));
+}
+
+export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreOutput> {
+  const hasPdf = images.some((url) => {
+    if (url.startsWith("data:")) return isPdfDataUri(url);
+    return detectMimeType(url) === "application/pdf";
+  });
+
+  const rid = reqId();
+  let parsed: unknown;
+  let provider_used: "groq" | "gemini";
+  let overall_confidence = 0;
+
+  if (hasPdf) {
+    // PDFs: Gemini only — Groq's vision model cannot read raw PDFs and
+    // no server-side rasterizer runs in this environment.
+    try {
+      parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+      provider_used = "gemini";
+      overall_confidence = getOverallConfidence(parsed);
+      console.log("[extract]", { rid, provider_used, fallback: false, hasPdf, overall_confidence });
+    } catch (err) {
+      console.error("[extract] Gemini failed for PDF; no fallback available", {
+        rid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw new Error("PDF extraction failed via Gemini (Groq cannot read PDFs): " +
+        (err instanceof Error ? err.message : String(err)));
+    }
   } else {
-    const raw = hasPdf ? await callGeminiPdf(images, hint) : await callGroqVision(images, hint);
-    parsed = normalizeResponse(parseJsonLoose(raw));
-    const secondary = await verifyCriticalFields(images, hasPdf, hint);
-    parsed = postProcess(parsed, secondary);
+    // Images: Groq first. Cascade to Gemini only when confidence is low
+    // or Groq hard-fails.
+    let groqParsed: unknown | null = null;
+    let groqConfidence = 0;
+    let groqErr: unknown = null;
+
+    try {
+      groqParsed = await runGroqOnImages(images, hint);
+      groqConfidence = getOverallConfidence(groqParsed);
+    } catch (err) {
+      groqErr = err;
+      console.error("[extract] Groq hard failure — falling back to Gemini", {
+        rid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    if (groqErr) {
+      // Hard-failure fallback to Gemini.
+      try {
+        parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+        provider_used = "gemini";
+        overall_confidence = getOverallConfidence(parsed);
+        console.log("[extract]", {
+          rid,
+          provider_used,
+          fallback: true,
+          reason: "groq_hard_failure",
+          overall_confidence,
+        });
+      } catch (gErr) {
+        throw new Error(
+          "Both providers failed. Groq: " +
+            (groqErr instanceof Error ? groqErr.message : String(groqErr)) +
+            " | Gemini: " +
+            (gErr instanceof Error ? gErr.message : String(gErr)),
+        );
+      }
+    } else if (groqConfidence >= CONFIDENCE_THRESHOLD) {
+      parsed = groqParsed;
+      provider_used = "groq";
+      overall_confidence = groqConfidence;
+      console.log("[extract]", { rid, provider_used, fallback: false, overall_confidence });
+    } else {
+      // Cascade: try Gemini and keep the higher-confidence result.
+      // Prefer Groq on near-ties (within TIE_MARGIN) to save cost.
+      console.log("[extract] cascade to Gemini due to low Groq confidence", {
+        rid,
+        groq_confidence: groqConfidence,
+        threshold: CONFIDENCE_THRESHOLD,
+      });
+      try {
+        const gemParsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+        const gemConfidence = getOverallConfidence(gemParsed);
+        if (gemConfidence > groqConfidence + TIE_MARGIN) {
+          parsed = gemParsed;
+          provider_used = "gemini";
+          overall_confidence = gemConfidence;
+        } else {
+          parsed = groqParsed;
+          provider_used = "groq";
+          overall_confidence = groqConfidence;
+        }
+        console.log("[extract] cascade result", {
+          rid,
+          provider_used,
+          fallback: provider_used === "gemini",
+          reason: "low_groq_confidence",
+          groq_confidence: groqConfidence,
+          gemini_confidence: gemConfidence,
+        });
+      } catch (gErr) {
+        // Cascade Gemini call failed — keep the Groq result.
+        console.error("[extract] Gemini cascade failed; keeping Groq result", {
+          rid,
+          error: gErr instanceof Error ? gErr.message : String(gErr),
+        });
+        parsed = groqParsed;
+        provider_used = "groq";
+        overall_confidence = groqConfidence;
+      }
+    }
   }
 
+  parsed = postProcess(parsed);
+
+  // Ensure overall_confidence on the top-level object mirrors the computed value
+  // so downstream reads (DB column, response) stay consistent with the decision.
+  const rootObj = toObject(parsed);
+  if (rootObj && !Array.isArray(rootObj.documents)) {
+    rootObj.overall_confidence = Number(overall_confidence.toFixed(2));
+  }
+
+  const meets_confidence_threshold = overall_confidence >= CONFIDENCE_THRESHOLD;
   const pretty = JSON.stringify(parsed, null, 2);
-  return { json: pretty, parsed };
+  return { json: pretty, parsed, provider_used, overall_confidence, meets_confidence_threshold };
 }
+
