@@ -45,19 +45,21 @@ async function fileToDataUrl(file: File): Promise<string> {
 
 async function pdfToImages(file: File): Promise<string[]> {
   const pdfjs = await import("pdfjs-dist");
-  (pdfjs as any).GlobalWorkerOptions.workerSrc = 
+  (pdfjs as any).GlobalWorkerOptions.workerSrc =
     `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-  
+
   const buf = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: buf }).promise;
-  const out: string[] = [];
 
-  for (let i = 1; i <= pdf.numPages; i++) {
+  // Render pages in parallel. The pdf.js worker serializes internally, but
+  // firing them concurrently overlaps decode + canvas encode across pages
+  // and removes the sequential await chain that dominated wall time.
+  const t0 = performance.now();
+  const pageNums = Array.from({ length: pdf.numPages }, (_, i) => i + 1);
+  const out = await Promise.all(pageNums.map(async (i) => {
     const page = await pdf.getPage(i);
-
-    // Scale down: fit within 1200px wide max
     const base = page.getViewport({ scale: 1 });
-    const scale = Math.min(1.5, 1200 / base.width); // was hardcoded 2
+    const scale = Math.min(1.5, 1200 / base.width);
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement("canvas");
@@ -65,10 +67,13 @@ async function pdfToImages(file: File): Promise<string[]> {
     canvas.height = viewport.height;
     const ctx = canvas.getContext("2d")!;
     await page.render({ canvasContext: ctx, viewport } as any).promise;
-
-    // JPEG at 0.85 quality instead of PNG — ~70% smaller
-    out.push(canvas.toDataURL("image/jpeg", 0.85));
-  }
+    const url = canvas.toDataURL("image/jpeg", 0.85);
+    // Free the backing store immediately after encoding.
+    canvas.width = 0;
+    canvas.height = 0;
+    return url;
+  }));
+  console.log("[upload] pdfToImages", { pages: pdf.numPages, ms: Math.round(performance.now() - t0) });
   return out;
 }
 
@@ -102,15 +107,18 @@ function UploadPage() {
         // Send PDFs directly to Vertex as a single application/pdf part —
         // 1 request per PDF instead of N (one per rasterized page). This is
         // the single biggest Vertex quota win. Client-side rasterization is
-        // only kept for the preview grid on /extract.
-        const images: string[] = isPdf ? [previewUrl] : [previewUrl];
-        // Preview-grid page images (used on /extract for the thumbnail rail).
-        const pageImages: string[] = isPdf ? await pdfToImages(f) : [previewUrl];
+        // only kept for the preview grid on /extract, so run it IN PARALLEL
+        // with the extraction request instead of blocking on it first.
+        const images: string[] = [previewUrl];
+        const tStart = performance.now();
+        const pageImagesP: Promise<string[]> = isPdf ? pdfToImages(f) : Promise.resolve([previewUrl]);
+        const extractP = extractDocument({ data: { images } });
         await tick(1);
         await tick(2);
         await tick(3);
 
-        const result = await extractDocument({ data: { images } });
+        const [result, pageImages] = await Promise.all([extractP, pageImagesP]);
+        console.log("[upload] end-to-end", { ms: Math.round(performance.now() - tStart), pages: pageImages.length });
         await tick(4);
 
         sessionStorage.setItem(

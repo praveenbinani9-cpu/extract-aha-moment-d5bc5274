@@ -1051,14 +1051,50 @@ export type ExtractCoreOutput = ExtractCoreResult & {
 };
 
 
+// Bounded-concurrency map: run `worker` over `items` with up to `limit` in-flight.
+// Preserves input order and never fails-fast — each slot picks the next index.
+async function pMap<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  const width = Math.max(1, Math.min(limit, items.length));
+  let cursor = 0;
+  const runners = Array.from({ length: width }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 async function runGroqOnImages(images: string[], hint?: string): Promise<unknown> {
   if (images.length > 1) {
-    // Process each image independently to prevent cross-page contamination.
-    // Sequential to stay under provider TPM limits.
-    const perImage: unknown[] = [];
-    for (const img of images) {
-      perImage.push(normalizeResponse(parseJsonLoose(await callGroqVision([img], hint))));
-    }
+    // Process each image independently to prevent cross-page contamination,
+    // but fan out in parallel with bounded concurrency (default 5, tunable
+    // via EXTRACT_CONCURRENCY) so multi-page docs don't pay the full
+    // per-page latency in series.
+    const rid = reqId();
+    const limit = Math.max(1, parseInt(process.env.EXTRACT_CONCURRENCY ?? "5", 10) || 5);
+    const t0 = Date.now();
+    console.log("[groq] parallel start", { rid, pages: images.length, concurrency: limit });
+    const perImage = await pMap(images, limit, async (img, i) => {
+      const started = Date.now();
+      try {
+        const raw = await callGroqVision([img], hint);
+        const out = normalizeResponse(parseJsonLoose(raw));
+        console.log("[groq] page done", { rid, page: i + 1, ms: Date.now() - started });
+        return out;
+      } catch (err) {
+        console.error("[groq] page failed", { rid, page: i + 1, ms: Date.now() - started, error: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+    });
+    console.log("[groq] parallel done", { rid, pages: images.length, total_ms: Date.now() - t0 });
     const docs: unknown[] = [];
     for (const r of perImage) {
       const o = toObject(r);
@@ -1071,6 +1107,7 @@ async function runGroqOnImages(images: string[], hint?: string): Promise<unknown
 }
 
 export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreOutput> {
+  const t0 = Date.now();
   const hasPdf = images.some((url) => {
     if (url.startsWith("data:")) return isPdfDataUri(url);
     return detectMimeType(url) === "application/pdf";
@@ -1080,6 +1117,7 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   let parsed: unknown;
   let provider_used: "groq" | "gemini";
   let overall_confidence = 0;
+  const tProviderStart = Date.now();
 
   if (hasPdf) {
     // PDFs: use Lovable AI Gateway first. Direct Vertex has been producing
@@ -1225,6 +1263,8 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
     }
   }
 
+  const providerMs = Date.now() - tProviderStart;
+  const tPost = Date.now();
   parsed = postProcess(parsed);
 
   // Ensure overall_confidence on the top-level object mirrors the computed value
@@ -1235,7 +1275,19 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   }
 
   const meets_confidence_threshold = overall_confidence >= CONFIDENCE_THRESHOLD;
+  const tSerialize = Date.now();
   const pretty = JSON.stringify(parsed, null, 2);
+  const totalMs = Date.now() - t0;
+  console.log("[extract] timing", {
+    rid,
+    hasPdf,
+    pages: images.length,
+    provider_ms: providerMs,
+    postprocess_ms: tSerialize - tPost,
+    serialize_ms: Date.now() - tSerialize,
+    total_ms: totalMs,
+    provider_used,
+  });
   return { json: pretty, parsed, provider_used, overall_confidence, meets_confidence_threshold };
 }
 

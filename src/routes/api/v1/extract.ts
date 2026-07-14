@@ -147,6 +147,7 @@ export const Route = createFileRoute("/api/v1/extract")({
         }),
 
       POST: async ({ request }) => {
+        const tReq = Date.now();
         // ── Auth ──
         const authHeader = request.headers.get("authorization") ?? "";
         const apiKey = authHeader.startsWith("Bearer ")
@@ -155,57 +156,60 @@ export const Route = createFileRoute("/api/v1/extract")({
         if (!apiKey) return json({ error: "Missing Bearer api_key" }, 401);
 
         // ── Parse body (JSON or multipart) ──
+        const tParseStart = Date.now();
         const parsed = await parseRequest(request);
         if ("error" in parsed) return json({ error: parsed.error }, parsed.status);
         const { images, hint } = parsed;
+        const parseMs = Date.now() - tParseStart;
 
-        // ── Tenant lookup ──
+        // ── Tenant lookup + PDF page counting in parallel ──
+        // Parallelize independent work: tenant/usage lookups and per-file
+        // page counting all start at the same time.
+        const tPreflight = Date.now();
         const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+        const { countPdfPages, isPdfDataUri } = await import("@/lib/pdf-pages.server");
+        const month = currentMonth();
 
-        const { data: tenant, error: tenantErr } = await supabaseAdmin
+        const tenantP = supabaseAdmin
           .from("tenants")
           .select("id, status, monthly_limit, rate_per_page")
           .eq("api_key", apiKey)
           .maybeSingle();
+        const pageCountsP = Promise.all(
+          images.map(async (img) => {
+            if (!isPdfDataUri(img)) return 1;
+            const n = await countPdfPages(img);
+            return n && n > 0 ? n : 1;
+          }),
+        );
 
+        const [{ data: tenant, error: tenantErr }, pageCounts] = await Promise.all([tenantP, pageCountsP]);
         if (tenantErr) return json({ error: "Lookup failed" }, 500);
         if (!tenant)   return json({ error: "Invalid api_key" }, 401);
         if (tenant.status !== "active") return json({ error: "Tenant is disabled" }, 403);
 
-        const ratePerPage = Number((tenant as { rate_per_page: number | string | null }).rate_per_page ?? 0) || 0;
-
-        // ── Usage check ──
-        const month = currentMonth();
-        const limit = (tenant as { monthly_limit: number | null }).monthly_limit ?? 0;
-
+        // Usage lookup can only run after we have tenant.id.
         const { data: usage, error: usageErr } = await supabaseAdmin
           .from("tenant_usage")
           .select("extraction_count")
           .eq("tenant_id", tenant.id)
           .eq("usage_month", month)
           .maybeSingle();
-
         if (usageErr) return json({ error: "Usage lookup failed" }, 500);
 
+        const ratePerPage = Number((tenant as { rate_per_page: number | string | null }).rate_per_page ?? 0) || 0;
+        const limit = (tenant as { monthly_limit: number | null }).monthly_limit ?? 0;
         const used = usage?.extraction_count ?? 0;
         if (limit > 0 && used >= limit) {
           return json({ error: "Monthly limit exceeded" }, 429);
         }
 
-        // ── Count billable pages (real PDF page counts; images = 1 each) ──
-        const { countPdfPages, isPdfDataUri } = await import("@/lib/pdf-pages.server");
-        let billedPages = 0;
-        for (const img of images) {
-          if (isPdfDataUri(img)) {
-            const n = await countPdfPages(img);
-            billedPages += n && n > 0 ? n : 1;
-          } else {
-            billedPages += 1;
-          }
-        }
+        let billedPages = pageCounts.reduce((a, b) => a + b, 0);
         if (billedPages < 1) billedPages = images.length || 1;
+        const preflightMs = Date.now() - tPreflight;
 
         // ── Extract ──
+        const tExtract = Date.now();
         const { extractCore } = await import("@/lib/extract-core.server");
         let result;
         try {
@@ -213,8 +217,10 @@ export const Route = createFileRoute("/api/v1/extract")({
         } catch (e) {
           return json({ error: e instanceof Error ? e.message : "Extraction failed" }, 502);
         }
+        const extractMs = Date.now() - tExtract;
 
         // ── Save to DB ──
+        const tDb = Date.now();
         const parsedJson = result.parsed as Record<string, unknown> | null;
         const documentsArr = Array.isArray(parsedJson?.documents)
           ? (parsedJson!.documents as Array<Record<string, unknown>>)
@@ -248,21 +254,28 @@ export const Route = createFileRoute("/api/v1/extract")({
         if (insertErr) {
           console.error("extractions insert failed", insertErr);
         } else {
-          const { error: rpcErr } = await supabaseAdmin.rpc("increment_usage", {
-            p_tenant_id: tenant.id,
-            p_month: month,
-            p_count: docCount,
-          });
-          if (rpcErr) console.error("increment_usage failed", rpcErr);
-
-          // ── Record billable usage (never let this affect the response) ──
-          try {
-            const { recordUsage } = await import("@/lib/billing.server");
-            await recordUsage(tenant.id, inserted.id, billedPages, ratePerPage);
-          } catch (err) {
-            console.error("recordUsage failed", err);
-          }
+          // Fire post-insert bookkeeping in parallel — usage increment and
+          // billable-usage recording are independent and don't need to run
+          // in series.
+          const usageP = supabaseAdmin
+            .rpc("increment_usage", { p_tenant_id: tenant.id, p_month: month, p_count: docCount })
+            .then(({ error }) => { if (error) console.error("increment_usage failed", error); });
+          const billP = import("@/lib/billing.server")
+            .then(({ recordUsage }) => recordUsage(tenant.id, inserted.id, billedPages, ratePerPage))
+            .catch((err) => console.error("recordUsage failed", err));
+          await Promise.all([usageP, billP]);
         }
+        const dbMs = Date.now() - tDb;
+        console.log("[api/extract] timing", {
+          parse_ms: parseMs,
+          preflight_ms: preflightMs,
+          extract_ms: extractMs,
+          db_ms: dbMs,
+          total_ms: Date.now() - tReq,
+          pages: images.length,
+          billed_pages: billedPages,
+          provider_used,
+        });
 
         return json({
           ok: true,
