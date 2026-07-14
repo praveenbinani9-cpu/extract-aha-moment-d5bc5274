@@ -45,19 +45,21 @@ async function fileToDataUrl(file: File): Promise<string> {
 
 async function pdfToImages(file: File): Promise<string[]> {
   const pdfjs = await import("pdfjs-dist");
-  (pdfjs as any).GlobalWorkerOptions.workerSrc = 
+  (pdfjs as any).GlobalWorkerOptions.workerSrc =
     `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-  
+
   const buf = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: buf }).promise;
-  const out: string[] = [];
 
-  for (let i = 1; i <= pdf.numPages; i++) {
+  // Render pages in parallel. The pdf.js worker serializes internally, but
+  // firing them concurrently overlaps decode + canvas encode across pages
+  // and removes the sequential await chain that dominated wall time.
+  const t0 = performance.now();
+  const pageNums = Array.from({ length: pdf.numPages }, (_, i) => i + 1);
+  const out = await Promise.all(pageNums.map(async (i) => {
     const page = await pdf.getPage(i);
-
-    // Scale down: fit within 1200px wide max
     const base = page.getViewport({ scale: 1 });
-    const scale = Math.min(1.5, 1200 / base.width); // was hardcoded 2
+    const scale = Math.min(1.5, 1200 / base.width);
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement("canvas");
@@ -65,10 +67,13 @@ async function pdfToImages(file: File): Promise<string[]> {
     canvas.height = viewport.height;
     const ctx = canvas.getContext("2d")!;
     await page.render({ canvasContext: ctx, viewport } as any).promise;
-
-    // JPEG at 0.85 quality instead of PNG — ~70% smaller
-    out.push(canvas.toDataURL("image/jpeg", 0.85));
-  }
+    const url = canvas.toDataURL("image/jpeg", 0.85);
+    // Free the backing store immediately after encoding.
+    canvas.width = 0;
+    canvas.height = 0;
+    return url;
+  }));
+  console.log("[upload] pdfToImages", { pages: pdf.numPages, ms: Math.round(performance.now() - t0) });
   return out;
 }
 
