@@ -1107,6 +1107,7 @@ async function runGroqOnImages(images: string[], hint?: string): Promise<unknown
 }
 
 export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreOutput> {
+  const t0 = Date.now();
   const hasPdf = images.some((url) => {
     if (url.startsWith("data:")) return isPdfDataUri(url);
     return detectMimeType(url) === "application/pdf";
@@ -1116,6 +1117,7 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   let parsed: unknown;
   let provider_used: "groq" | "gemini";
   let overall_confidence = 0;
+  const tProviderStart = Date.now();
 
   if (hasPdf) {
     // PDFs: use Lovable AI Gateway first. Direct Vertex has been producing
