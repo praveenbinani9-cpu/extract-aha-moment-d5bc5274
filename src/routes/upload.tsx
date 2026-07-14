@@ -107,15 +107,18 @@ function UploadPage() {
         // Send PDFs directly to Vertex as a single application/pdf part —
         // 1 request per PDF instead of N (one per rasterized page). This is
         // the single biggest Vertex quota win. Client-side rasterization is
-        // only kept for the preview grid on /extract.
-        const images: string[] = isPdf ? [previewUrl] : [previewUrl];
-        // Preview-grid page images (used on /extract for the thumbnail rail).
-        const pageImages: string[] = isPdf ? await pdfToImages(f) : [previewUrl];
+        // only kept for the preview grid on /extract, so run it IN PARALLEL
+        // with the extraction request instead of blocking on it first.
+        const images: string[] = [previewUrl];
+        const tStart = performance.now();
+        const pageImagesP: Promise<string[]> = isPdf ? pdfToImages(f) : Promise.resolve([previewUrl]);
+        const extractP = extractDocument({ data: { images } });
         await tick(1);
         await tick(2);
         await tick(3);
 
-        const result = await extractDocument({ data: { images } });
+        const [result, pageImages] = await Promise.all([extractP, pageImagesP]);
+        console.log("[upload] end-to-end", { ms: Math.round(performance.now() - tStart), pages: pageImages.length });
         await tick(4);
 
         sessionStorage.setItem(
