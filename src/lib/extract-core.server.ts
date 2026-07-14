@@ -1263,6 +1263,8 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
     }
   }
 
+  const providerMs = Date.now() - tProviderStart;
+  const tPost = Date.now();
   parsed = postProcess(parsed);
 
   // Ensure overall_confidence on the top-level object mirrors the computed value
@@ -1273,7 +1275,19 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   }
 
   const meets_confidence_threshold = overall_confidence >= CONFIDENCE_THRESHOLD;
+  const tSerialize = Date.now();
   const pretty = JSON.stringify(parsed, null, 2);
+  const totalMs = Date.now() - t0;
+  console.log("[extract] timing", {
+    rid,
+    hasPdf,
+    pages: images.length,
+    provider_ms: providerMs,
+    postprocess_ms: tSerialize - tPost,
+    serialize_ms: Date.now() - tSerialize,
+    total_ms: totalMs,
+    provider_used,
+  });
   return { json: pretty, parsed, provider_used, overall_confidence, meets_confidence_threshold };
 }
 
