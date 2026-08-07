@@ -508,6 +508,8 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
 
+  let modelName = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+
   const content: Array<Record<string, unknown>> = [
     {
       type: "text",
@@ -519,22 +521,22 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
     })),
   ];
 
-  const body = JSON.stringify({
-    model: "meta-llama/llama-4-scout-17b-16e-instruct",
-    temperature: 0,
-    top_p: 1,
-    seed: 7,
-    max_tokens: 8192,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content },
-    ],
-  });
-
   const rid = reqId();
   let lastErr = "";
   for (let attempt = 0; attempt < 4; attempt++) {
+    const body = JSON.stringify({
+      model: modelName,
+      temperature: 0,
+      top_p: 1,
+      seed: 7,
+      max_tokens: 8192,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content },
+      ],
+    });
+
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -548,6 +550,13 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
 
     const text = await res.text();
     lastErr = `Groq API error ${res.status}: ${text.slice(0, 500)}`;
+
+    if (res.status === 404 && modelName !== "llama-3.2-11b-vision-preview") {
+      console.warn(`[groq] Model ${modelName} returned 404, falling back to llama-3.2-11b-vision-preview`, { rid });
+      modelName = "llama-3.2-11b-vision-preview";
+      continue;
+    }
+
     if (res.status !== 429 && res.status < 500) {
       console.error("[groq]", { rid, attempt, status: res.status, error: lastErr });
       break;
@@ -596,6 +605,7 @@ function pemToArrayBuffer(pem: string): ArrayBuffer {
   const cleaned = pem
     .replace(/-----BEGIN [^-]+-----/g, "")
     .replace(/-----END [^-]+-----/g, "")
+    .replace(/\\n/g, "")
     .replace(/\s+/g, "");
   const binary = atob(cleaned);
   const bytes = new Uint8Array(binary.length);
@@ -694,10 +704,6 @@ async function getVertexAccessToken(): Promise<string> {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${encodeURIComponent(jwt)}`,
   });
-  if (!tokenRes.ok) {
-    const errText = await tokenRes.text();
-    throw new Error(`Vertex AI token exchange failed ${tokenRes.status}: ${errText.slice(0, 500)}`);
-  }
   const tokenJson = (await tokenRes.json()) as { access_token?: string; expires_in?: number };
   if (!tokenJson.access_token) throw new Error("Vertex AI token exchange returned no access_token");
 
@@ -710,9 +716,13 @@ async function getVertexAccessToken(): Promise<string> {
 
 // Vertex AI Gemini call. Supports both PDFs and images via inlineData parts.
 async function callGeminiDirect(images: string[], hint?: string): Promise<string> {
+  const geminiApiKey = process.env.VERTEX_AI_API_KEY || process.env.GEMINI_API_KEY;
   const projectId = process.env.GCP_PROJECT_ID;
   const location = process.env.GCP_LOCATION || "us-central1";
-  if (!projectId) throw new Error("GCP_PROJECT_ID is not configured");
+
+  if (!geminiApiKey && !projectId) {
+    throw new Error("Neither VERTEX_AI_API_KEY / GEMINI_API_KEY nor GCP_PROJECT_ID is configured");
+  }
 
   const parts: Array<Record<string, unknown>> = [
     {
@@ -753,7 +763,9 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     ? "aiplatform.googleapis.com"
     : `${location}-aiplatform.googleapis.com`;
   let modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  let endpoint = `https://${host}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
+  let endpoint = geminiApiKey
+    ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
+    : `https://${host}/v1/projects/${encodeURIComponent(projectId!)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
   const rid = reqId();
   let lastErr = "";
 
@@ -761,10 +773,10 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   // outbound fetch with a bare "fetch failed" when the request body is very
   // large, and a clear error is far more useful than a silent retry loop.
   const PAYLOAD_LIMIT_BYTES = 18 * 1024 * 1024; // ~18MB serialized JSON
-  console.log("[vertex] request", { rid, payload_bytes: body.length, endpoint_host: host, model: modelName });
+  console.log("[gemini] request", { rid, payload_bytes: body.length, mode: geminiApiKey ? "api_key" : "service_account", model: modelName });
   if (body.length > PAYLOAD_LIMIT_BYTES) {
     throw new Error(
-      `Document too large for Vertex AI (${(body.length / 1024 / 1024).toFixed(1)}MB payload, limit ~18MB). ` +
+      `Document too large for Gemini API (${(body.length / 1024 / 1024).toFixed(1)}MB payload, limit ~18MB). ` +
       `Please upload a smaller PDF or compress it first.`,
     );
   }
@@ -776,21 +788,21 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const MAX_SINGLE_WAIT_MS = 12_000;
   const startedAt = Date.now();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    let accessToken: string;
-    try {
-      accessToken = await getVertexAccessToken();
-    } catch (e) {
-      throw new Error(`Vertex AI auth failed: ${e instanceof Error ? e.message : String(e)}`);
+    let headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (!geminiApiKey) {
+      try {
+        const accessToken = await getVertexAccessToken();
+        headers["Authorization"] = `Bearer ${accessToken}`;
+      } catch (e) {
+        throw new Error(`Vertex AI auth failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
 
     let res: Response;
     try {
       res = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers,
         body,
         // Abort before Cloudflare's 524 gateway timeout (~100s) so we
         // surface a real error and can retry within budget.
@@ -827,7 +839,9 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     if (res.status === 404 && modelName !== "gemini-2.5-flash") {
       console.warn(`[vertex] Model ${modelName} returned 404, falling back to gemini-2.5-flash`, { rid });
       modelName = "gemini-2.5-flash";
-      endpoint = `https://${host}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
+      endpoint = geminiApiKey
+        ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
+        : `https://${host}/v1/projects/${encodeURIComponent(projectId ?? "")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
       continue;
     }
     // Auth issue — bust the token cache and retry once immediately.
@@ -1173,7 +1187,9 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   const tProviderStart = Date.now();
 
   if (hasPdf) {
-    const vertexFirst = process.env.VERTEX_PDF_FIRST !== "false";
+    const hasLovableKey = !!process.env.LOVABLE_API_KEY;
+    const vertexFirst = process.env.VERTEX_PDF_FIRST !== "false" || !hasLovableKey;
+
     if (vertexFirst) {
       try {
         parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
@@ -1182,16 +1198,21 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
         console.log("[extract]", { rid, provider_used, primary: "vertex", hasPdf, overall_confidence });
       } catch (vertexErr) {
         const vertexMsg = vertexErr instanceof Error ? vertexErr.message : String(vertexErr);
-        console.warn("[extract] Vertex failed for PDF; trying Lovable AI Gateway", { rid, error: vertexMsg });
-        try {
-          parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
-          provider_used = "gemini";
-          overall_confidence = getOverallConfidence(parsed);
-          console.log("[extract]", { rid, provider_used, fallback: true, via: "lovable-ai", hasPdf, overall_confidence });
-        } catch (gwErr) {
-          const gwMsg = gwErr instanceof Error ? gwErr.message : String(gwErr);
-          console.error("[extract] Both Vertex and Lovable AI Gateway failed for PDF", { rid, vertex: vertexMsg, gateway: gwMsg });
-          throw new Error(`PDF extraction failed. Vertex: ${vertexMsg}. Gateway fallback: ${gwMsg}`);
+        if (hasLovableKey) {
+          console.warn("[extract] Vertex failed for PDF; trying Lovable AI Gateway", { rid, error: vertexMsg });
+          try {
+            parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
+            provider_used = "gemini";
+            overall_confidence = getOverallConfidence(parsed);
+            console.log("[extract]", { rid, provider_used, fallback: true, via: "lovable-ai", hasPdf, overall_confidence });
+          } catch (gwErr) {
+            const gwMsg = gwErr instanceof Error ? gwErr.message : String(gwErr);
+            console.error("[extract] Both Vertex and Lovable AI Gateway failed for PDF", { rid, vertex: vertexMsg, gateway: gwMsg });
+            throw new Error(`PDF extraction failed. Vertex: ${vertexMsg}. Gateway fallback: ${gwMsg}`);
+          }
+        } else {
+          console.error("[extract] Vertex AI failed for PDF (no Lovable AI key configured)", { rid, error: vertexMsg });
+          throw new Error(`PDF extraction failed on Vertex AI: ${vertexMsg}. Ensure GCP_PROJECT_ID and GCP_SERVICE_ACCOUNT_JSON are configured.`);
         }
       }
     } else {
