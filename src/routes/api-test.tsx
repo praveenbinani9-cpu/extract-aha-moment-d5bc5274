@@ -43,8 +43,12 @@ export const Route = createFileRoute("/api-test")({
   }),
   component: ApiPlayground,
 });
-
-const ENDPOINT = "https://docwise-ai-eight.vercel.app/api/v1/extract";
+function getEndpointUrl(): string {
+  if (typeof window !== "undefined") {
+    return `${window.location.origin}/api/v1/extract`;
+  }
+  return "/api/v1/extract";
+}
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -149,8 +153,8 @@ function StatusBadge({ status }: { status: number }) {
 
 /* ─── cURL Generator ──────────────────────────────────────────────────────── */
 
-function buildCurl(apiKey: string, fileName: string) {
-  return `curl -X POST "${ENDPOINT}" \\
+function buildCurl(apiKey: string, fileName: string, targetEndpoint: string) {
+  return `curl -X POST "${targetEndpoint}" \\
   -H "Authorization: Bearer ${apiKey || "<your_api_key>"}" \\
   -H "Content-Type: multipart/form-data" \\
   -F "images=@${fileName || "invoice.pdf"}"`;
@@ -173,6 +177,8 @@ function ApiPlayground() {
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const responseRef = useRef<HTMLDivElement>(null);
+
+  const targetEndpoint = getEndpointUrl();
 
   // Read file
   const readFile = useCallback(async (f: File) => {
@@ -209,7 +215,7 @@ function ApiPlayground() {
     setActiveTab("response");
     const start = Date.now();
     try {
-      const res = await fetch(ENDPOINT, {
+      const res = await fetch(targetEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -369,8 +375,8 @@ function ApiPlayground() {
               {/* Endpoint info */}
               <div className="border-b border-border bg-surface/40 px-5 py-3">
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Globe className="h-3.5 w-3.5" />
-                  <span className="font-mono break-all">{ENDPOINT}</span>
+                  <Globe className="h-3.5 w-3.5 text-primary" />
+                  <span className="font-mono break-all text-foreground font-medium">{targetEndpoint}</span>
                 </div>
               </div>
 
@@ -645,10 +651,10 @@ function ApiPlayground() {
                           <Terminal className="h-4 w-4 text-primary" />
                           cURL Command
                         </h3>
-                        <CopyButton text={buildCurl(apiKey, file?.name ?? "")} />
+                        <CopyButton text={buildCurl(apiKey, file?.name ?? "", targetEndpoint)} />
                       </div>
                       <pre className="overflow-auto rounded-xl bg-[oklch(0.14_0.015_270)] p-4 font-mono text-[12px] leading-relaxed text-[oklch(0.85_0.06_150)]">
-                        {buildCurl(apiKey, file?.name ?? "")}
+                        {buildCurl(apiKey, file?.name ?? "", targetEndpoint)}
                       </pre>
 
                       <div className="mt-6 space-y-3">
@@ -657,7 +663,7 @@ function ApiPlayground() {
                           JSON Body (alternative)
                         </h3>
                         <pre className="overflow-auto rounded-xl bg-[oklch(0.14_0.015_270)] p-4 font-mono text-[12px] leading-relaxed text-[oklch(0.85_0.06_150)]">
-{`curl -X POST "${ENDPOINT}" \\
+{`curl -X POST "${targetEndpoint}" \\
   -H "Authorization: Bearer ${apiKey || "<your_api_key>"}" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -673,7 +679,7 @@ function ApiPlayground() {
                           JavaScript / Fetch
                         </h3>
                         <pre className="overflow-auto rounded-xl bg-[oklch(0.14_0.015_270)] p-4 font-mono text-[12px] leading-relaxed text-[oklch(0.85_0.06_150)]">
-{`const res = await fetch("${ENDPOINT}", {
+{`const res = await fetch("${targetEndpoint}", {
   method: "POST",
   headers: {
     "Authorization": "Bearer ${apiKey || "<your_api_key>"}",
