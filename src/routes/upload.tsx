@@ -226,7 +226,7 @@ function UploadPage() {
                     <div className="text-xs text-muted-foreground">AI is reading your document</div>
                   </div>
                 </div>
-                <span className="font-mono text-[11px] text-muted-foreground">gemini-3.5-flash-lite</span>
+                <span className="font-mono text-[11px] text-muted-foreground">groq · gemini 3.5</span>
               </div>
 
               <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted">

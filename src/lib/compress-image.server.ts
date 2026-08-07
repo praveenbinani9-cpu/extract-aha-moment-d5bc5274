@@ -86,7 +86,7 @@ export async function compressImageDataUri(
 
   try {
     const bytes = decodeBase64(b64);
-    const blob = new Blob([bytes], { type: mime });
+    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mime });
     const bitmap = await createImageBitmap(blob);
 
     const needsResize = bitmap.width > limit || bitmap.height > limit;

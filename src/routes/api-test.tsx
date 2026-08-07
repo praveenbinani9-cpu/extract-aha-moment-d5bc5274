@@ -208,7 +208,6 @@ function ApiPlayground() {
     setElapsed(0);
     setActiveTab("response");
     const start = Date.now();
-
     try {
       const res = await fetch(ENDPOINT, {
         method: "POST",

@@ -63,7 +63,7 @@ function Hero() {
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
           <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
         </span>
-        Live · Powered by Gemini 3.5 Flash Lite · 99.4% extraction accuracy
+        Live · Powered by Groq & Gemini · 99.4% extraction accuracy
       </motion.div>
 
       <motion.h1
@@ -187,7 +187,7 @@ function HeroPreview() {
             <span className="h-2 w-2 rounded-full bg-success" />
             Extracted in 1.8s · 24 fields · 99.2% confidence
           </span>
-          <span className="font-mono">gemini-3.5-flash-lite</span>
+          <span className="font-mono">groq · gemini 3.5</span>
         </div>
       </div>
     </motion.div>
@@ -215,7 +215,7 @@ function Logos() {
 const features = [
   { icon: Brain, title: "AI-native extraction", desc: "Trained on Indian GST invoices, E-Way Bills and POs. Understands tables, stamps, and handwritten notes." },
   { icon: ScanLine, title: "Field-level confidence", desc: "Every extracted field comes with a confidence score and source location in the original document." },
-  { icon: Zap, title: "Sub-second responses", desc: "Powered by Google Gemini's blazing-fast inference. Get structured JSON before your coffee cools." },
+  { icon: Zap, title: "Sub-second responses", desc: "Powered by Groq & Gemini's multi-provider vision inference. Get structured JSON in seconds." },
   { icon: Lock, title: "Validated by default", desc: "Built-in GSTIN, HSN/SAC and tax math validators flag errors before they hit your ledger." },
   { icon: Gauge, title: "99.4% accuracy", desc: "Benchmarked against 50,000+ real Indian business documents across 8 document types." },
   { icon: CheckCircle2, title: "Human-in-the-loop", desc: "Low-confidence fields route to a beautiful review queue. Approve in keystrokes." },

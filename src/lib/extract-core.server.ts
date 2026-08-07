@@ -4,7 +4,6 @@
 // existing extractDocument behavior.
 import { compressImages } from "./compress-image.server";
 import { VERTEX_EXTRACTION_SCHEMA } from "./extraction-response-schema";
-
 const SYSTEM_PROMPT = `You are a senior invoice and document extraction specialist.
 
 Your task is to extract data exactly as it appears on the document.
@@ -505,6 +504,67 @@ function reqId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+async function callGroqVision(images: string[], hint?: string): Promise<string> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
+
+  const content: Array<Record<string, unknown>> = [
+    {
+      type: "text",
+      text: `Extract structured data from this document.${hint ? " Hint: " + hint : ""} Return JSON only.`,
+    },
+    ...images.map((url) => ({
+      type: "image_url",
+      image_url: { url: normalizeImageUrl(url) },
+    })),
+  ];
+
+  const body = JSON.stringify({
+    model: "meta-llama/llama-4-scout-17b-16e-instruct",
+    temperature: 0,
+    top_p: 1,
+    seed: 7,
+    max_tokens: 8192,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content },
+    ],
+  });
+
+  const rid = reqId();
+  let lastErr = "";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body,
+    });
+
+    if (res.ok) {
+      const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+      return json.choices?.[0]?.message?.content ?? "{}";
+    }
+
+    const text = await res.text();
+    lastErr = `Groq API error ${res.status}: ${text.slice(0, 500)}`;
+    if (res.status !== 429 && res.status < 500) {
+      console.error("[groq]", { rid, attempt, status: res.status, error: lastErr });
+      break;
+    }
+
+    let waitMs = 0;
+    const retryAfter = res.headers.get("retry-after");
+    if (retryAfter) waitMs = Math.ceil(parseFloat(retryAfter) * 1000);
+    const m = text.match(/try again in ([\d.]+)s/i);
+    if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
+    if (!waitMs) waitMs = 2000 * (attempt + 1);
+    waitMs = Math.min(waitMs + 500, 30000);
+    console.warn("[groq] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  throw new Error(lastErr || "Groq API failed");
+}
 
 // ============================================================================
 // Vertex AI (Google Cloud) Gemini call
@@ -692,7 +752,7 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const host = location === "global"
     ? "aiplatform.googleapis.com"
     : `${location}-aiplatform.googleapis.com`;
-  let modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+  let modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   let endpoint = `https://${host}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
   const rid = reqId();
   let lastErr = "";
@@ -763,14 +823,13 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     const text = await res.text();
     lastErr = `Vertex AI error ${res.status}: ${text.slice(0, 500)}`;
 
-    // Model 404 — fallback to gemini-2.5-flash if 3.5-flash-lite is not provisioned in project
+    // Model 404 — fallback to gemini-2.5-flash if model is not provisioned in project
     if (res.status === 404 && modelName !== "gemini-2.5-flash") {
       console.warn(`[vertex] Model ${modelName} returned 404, falling back to gemini-2.5-flash`, { rid });
       modelName = "gemini-2.5-flash";
       endpoint = `https://${host}/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
       continue;
     }
-
     // Auth issue — bust the token cache and retry once immediately.
     if (res.status === 401 || res.status === 403) {
       cachedVertexToken = null;
@@ -790,7 +849,6 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
       body = buildVertexBody(false);
       continue;
     }
-
     if (res.status !== 429 && res.status < 500) {
       console.error("[vertex]", { rid, attempt, status: res.status, error: lastErr });
       break;
@@ -980,8 +1038,8 @@ function fieldsAgree(key: string, a: unknown, b: unknown): boolean {
 function crossCheckCritical(
   winner: unknown,
   loser: unknown,
-  winnerProvider: "gemini",
-  loserProvider: "gemini",
+  winnerProvider: "groq" | "gemini",
+  loserProvider: "groq" | "gemini",
   rid: string,
 ): void {
   const w = toObject(winner);
@@ -1005,7 +1063,7 @@ function crossCheckCritical(
     } else {
       const capped = current === null ? 0.7 : Math.min(current, 0.7);
       pfc[f.pfc] = Number(capped.toFixed(2));
-      const msg = `Critical field "${f.key}" disagreed between Pass 1 and Pass 2 — confidence lowered`;
+      const msg = `Critical field "${f.key}" disagreed between providers — confidence lowered`;
       if (!warnings.includes(msg)) warnings.push(msg);
       console.warn("[cross-check] disagreement", {
         rid,
@@ -1030,7 +1088,7 @@ function crossCheckCritical(
 }
 
 export type ExtractCoreOutput = ExtractCoreResult & {
-  provider_used: "gemini";
+  provider_used: "groq" | "gemini";
   overall_confidence: number;
   meets_confidence_threshold: boolean;
 };
@@ -1057,6 +1115,35 @@ async function pMap<T, R>(
   return results;
 }
 
+async function runGroqOnImages(images: string[], hint?: string): Promise<unknown> {
+  if (images.length > 1) {
+    const rid = reqId();
+    const limit = Math.max(1, parseInt(process.env.EXTRACT_CONCURRENCY ?? "5", 10) || 5);
+    const t0 = Date.now();
+    console.log("[groq] parallel start", { rid, pages: images.length, concurrency: limit });
+    const perImage = await pMap(images, limit, async (img, i) => {
+      const started = Date.now();
+      try {
+        const raw = await callGroqVision([img], hint);
+        const out = normalizeResponse(parseJsonLoose(raw));
+        console.log("[groq] page done", { rid, page: i + 1, ms: Date.now() - started });
+        return out;
+      } catch (err) {
+        console.error("[groq] page failed", { rid, page: i + 1, ms: Date.now() - started, error: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+    });
+    console.log("[groq] parallel done", { rid, pages: images.length, total_ms: Date.now() - t0 });
+    const docs: unknown[] = [];
+    for (const r of perImage) {
+      const o = toObject(r);
+      if (o && Array.isArray(o.documents)) docs.push(...o.documents);
+      else if (o) docs.push(o);
+    }
+    return docs.length === 1 ? docs[0] : { documents: docs };
+  }
+  return normalizeResponse(parseJsonLoose(await callGroqVision(images, hint)));
+}
 
 export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreOutput> {
   const t0 = Date.now();
@@ -1079,24 +1166,26 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
     if (url.startsWith("data:")) return isPdfDataUri(url);
     return detectMimeType(url) === "application/pdf";
   });
+
   let parsed: unknown;
-  const provider_used: "gemini" = "gemini";
+  let provider_used: "groq" | "gemini" = "gemini";
   let overall_confidence = 0;
   const tProviderStart = Date.now();
 
   if (hasPdf) {
-    // PDFs: use Vertex AI Gemini (gemini-3.5-flash-lite) first, fallback to Lovable AI Gateway if needed.
     const vertexFirst = process.env.VERTEX_PDF_FIRST !== "false";
     if (vertexFirst) {
       try {
         parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+        provider_used = "gemini";
         overall_confidence = getOverallConfidence(parsed);
-        console.log("[extract]", { rid, provider_used, primary: "vertex", model: "gemini-3.5-flash-lite", hasPdf, overall_confidence });
+        console.log("[extract]", { rid, provider_used, primary: "vertex", hasPdf, overall_confidence });
       } catch (vertexErr) {
         const vertexMsg = vertexErr instanceof Error ? vertexErr.message : String(vertexErr);
         console.warn("[extract] Vertex failed for PDF; trying Lovable AI Gateway", { rid, error: vertexMsg });
         try {
           parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
+          provider_used = "gemini";
           overall_confidence = getOverallConfidence(parsed);
           console.log("[extract]", { rid, provider_used, fallback: true, via: "lovable-ai", hasPdf, overall_confidence });
         } catch (gwErr) {
@@ -1108,6 +1197,7 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
     } else {
       try {
         parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
+        provider_used = "gemini";
         overall_confidence = getOverallConfidence(parsed);
         console.log("[extract]", { rid, provider_used, primary: "lovable-ai", hasPdf, overall_confidence });
       } catch (gwErr) {
@@ -1115,6 +1205,7 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
         console.warn("[extract] Lovable AI Gateway failed for PDF; trying Vertex", { rid, error: gwMsg });
         try {
           parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+          provider_used = "gemini";
           overall_confidence = getOverallConfidence(parsed);
           console.log("[extract]", { rid, provider_used, fallback: true, via: "vertex", hasPdf, overall_confidence });
         } catch (vertexErr) {
@@ -1125,62 +1216,84 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
       }
     }
   } else {
-    // Images: Primary pass with Gemini (gemini-3.5-flash-lite via Vertex AI)
+    // Images: Groq primary pass with Gemini cascade fallback
+    let groqParsed: unknown | null = null;
+    let groqConfidence = 0;
+    let groqErr: unknown = null;
+
     try {
-      parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
-      overall_confidence = getOverallConfidence(parsed);
-      console.log("[extract]", { rid, provider_used, model: "gemini-3.5-flash-lite", overall_confidence });
-    } catch (gErr) {
-      console.warn("[extract] Direct Vertex call failed for image; trying Lovable AI Gateway fallback", {
+      groqParsed = await runGroqOnImages(images, hint);
+      groqConfidence = getOverallConfidence(groqParsed);
+    } catch (err) {
+      groqErr = err;
+      console.error("[extract] Groq hard failure — falling back to Gemini", {
         rid,
-        error: gErr instanceof Error ? gErr.message : String(gErr),
+        error: err instanceof Error ? err.message : String(err),
       });
-      try {
-        parsed = normalizeResponse(parseJsonLoose(await callGeminiViaLovableGateway(images, hint)));
-        overall_confidence = getOverallConfidence(parsed);
-        console.log("[extract]", { rid, provider_used, via: "lovable-ai", overall_confidence });
-      } catch (gwErr) {
-        throw new Error(
-          "Gemini extraction failed. Direct Vertex: " +
-            (gErr instanceof Error ? gErr.message : String(gErr)) +
-            " | Gateway fallback: " +
-            (gwErr instanceof Error ? gwErr.message : String(gwErr)),
-        );
-      }
     }
 
-    // Double-pass verification: if confidence is below threshold, run second pass with Gemini & cross-check
-    if (overall_confidence < CONFIDENCE_THRESHOLD) {
-      console.log("[extract] low confidence, executing double-pass verification with Gemini", {
+    if (groqErr) {
+      try {
+        parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+        provider_used = "gemini";
+        overall_confidence = getOverallConfidence(parsed);
+        console.log("[extract]", { rid, provider_used, fallback: true, reason: "groq_hard_failure", overall_confidence });
+      } catch (gErr) {
+        throw new Error(
+          "Both providers failed. Groq: " +
+            (groqErr instanceof Error ? groqErr.message : String(groqErr)) +
+            " | Gemini: " +
+            (gErr instanceof Error ? gErr.message : String(gErr)),
+        );
+      }
+    } else if (groqConfidence >= CONFIDENCE_THRESHOLD) {
+      parsed = groqParsed;
+      provider_used = "groq";
+      overall_confidence = groqConfidence;
+      console.log("[extract]", { rid, provider_used, fallback: false, overall_confidence });
+    } else {
+      console.log("[extract] cascade to Gemini due to low Groq confidence", {
         rid,
-        confidence: overall_confidence,
+        groq_confidence: groqConfidence,
         threshold: CONFIDENCE_THRESHOLD,
       });
       try {
-        const pass2Parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
-        const pass2Confidence = getOverallConfidence(pass2Parsed);
-        let winnerParsed = parsed;
-        let loserParsed = pass2Parsed;
-
-        if (pass2Confidence > overall_confidence + TIE_MARGIN) {
-          winnerParsed = pass2Parsed;
-          loserParsed = parsed;
-          parsed = pass2Parsed;
-          overall_confidence = pass2Confidence;
+        const gemParsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+        const gemConfidence = getOverallConfidence(gemParsed);
+        let loserParsed: unknown;
+        let loserProvider: "groq" | "gemini";
+        if (gemConfidence > groqConfidence + TIE_MARGIN) {
+          parsed = gemParsed;
+          provider_used = "gemini";
+          overall_confidence = gemConfidence;
+          loserParsed = groqParsed;
+          loserProvider = "groq";
+        } else {
+          parsed = groqParsed;
+          provider_used = "groq";
+          overall_confidence = groqConfidence;
+          loserParsed = gemParsed;
+          loserProvider = "gemini";
         }
-        crossCheckCritical(winnerParsed, loserParsed, "gemini", "gemini", rid);
+        crossCheckCritical(parsed, loserParsed, provider_used, loserProvider, rid);
         overall_confidence = getOverallConfidence(parsed);
-        console.log("[extract] double-pass verification completed", {
+        console.log("[extract] cascade result", {
           rid,
-          pass1_confidence: overall_confidence,
-          pass2_confidence: pass2Confidence,
+          provider_used,
+          fallback: provider_used === "gemini",
+          reason: "low_groq_confidence",
+          groq_confidence: groqConfidence,
+          gemini_confidence: gemConfidence,
           overall_confidence_after_crosscheck: overall_confidence,
         });
-      } catch (p2Err) {
-        console.warn("[extract] Gemini double pass failed; keeping pass 1 result", {
+      } catch (gErr) {
+        console.error("[extract] Gemini cascade failed; keeping Groq result", {
           rid,
-          error: p2Err instanceof Error ? p2Err.message : String(p2Err),
+          error: gErr instanceof Error ? gErr.message : String(gErr),
         });
+        parsed = groqParsed;
+        provider_used = "groq";
+        overall_confidence = groqConfidence;
       }
     }
   }
@@ -1189,8 +1302,6 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   const tPost = Date.now();
   parsed = postProcess(parsed);
 
-  // Ensure overall_confidence on the top-level object mirrors the computed value
-  // so downstream reads (DB column, response) stay consistent with the decision.
   const rootObj = toObject(parsed);
   if (rootObj && !Array.isArray(rootObj.documents)) {
     rootObj.overall_confidence = Number(overall_confidence.toFixed(2));

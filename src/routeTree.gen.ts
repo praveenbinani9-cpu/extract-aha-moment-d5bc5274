@@ -9,30 +9,24 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as UploadRouteImport } from './routes/upload'
-import { Route as ExtractRouteImport } from './routes/extract'
-import { Route as AuthRouteImport } from './routes/auth'
-import { Route as ApiTestRouteImport } from './routes/api-test'
-import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
+import { Route as ApiTestRouteImport } from './routes/api-test'
+import { Route as AuthRouteImport } from './routes/auth'
+import { Route as ExtractRouteImport } from './routes/extract'
+import { Route as UploadRouteImport } from './routes/upload'
 import { Route as AuthenticatedAdminRouteImport } from './routes/_authenticated/admin'
-import { Route as ApiV1InvoicesRouteImport } from './routes/api/v1/invoices'
 import { Route as ApiV1ExtractRouteImport } from './routes/api/v1/extract'
+import { Route as ApiV1InvoicesRouteImport } from './routes/api/v1/invoices'
 import { Route as ApiV1UsageCurrentRouteImport } from './routes/api/v1/usage.current'
 
-const UploadRoute = UploadRouteImport.update({
-  id: '/upload',
-  path: '/upload',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ExtractRoute = ExtractRouteImport.update({
-  id: '/extract',
-  path: '/extract',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthRoute = AuthRouteImport.update({
-  id: '/auth',
-  path: '/auth',
+const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
+  id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiTestRoute = ApiTestRouteImport.update({
@@ -40,13 +34,19 @@ const ApiTestRoute = ApiTestRouteImport.update({
   path: '/api-test',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
-  id: '/_authenticated',
+const AuthRoute = AuthRouteImport.update({
+  id: '/auth',
+  path: '/auth',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const ExtractRoute = ExtractRouteImport.update({
+  id: '/extract',
+  path: '/extract',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UploadRoute = UploadRouteImport.update({
+  id: '/upload',
+  path: '/upload',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedAdminRoute = AuthenticatedAdminRouteImport.update({
@@ -54,14 +54,14 @@ const AuthenticatedAdminRoute = AuthenticatedAdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const ApiV1InvoicesRoute = ApiV1InvoicesRouteImport.update({
-  id: '/api/v1/invoices',
-  path: '/api/v1/invoices',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ApiV1ExtractRoute = ApiV1ExtractRouteImport.update({
   id: '/api/v1/extract',
   path: '/api/v1/extract',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV1InvoicesRoute = ApiV1InvoicesRouteImport.update({
+  id: '/api/v1/invoices',
+  path: '/api/v1/invoices',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiV1UsageCurrentRoute = ApiV1UsageCurrentRouteImport.update({
@@ -156,32 +156,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/upload': {
-      id: '/upload'
-      path: '/upload'
-      fullPath: '/upload'
-      preLoaderRoute: typeof UploadRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/extract': {
-      id: '/extract'
-      path: '/extract'
-      fullPath: '/extract'
-      preLoaderRoute: typeof ExtractRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/auth': {
-      id: '/auth'
-      path: '/auth'
-      fullPath: '/auth'
-      preLoaderRoute: typeof AuthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api-test': {
-      id: '/api-test'
-      path: '/api-test'
-      fullPath: '/api-test'
-      preLoaderRoute: typeof ApiTestRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated': {
@@ -191,11 +170,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/api-test': {
+      id: '/api-test'
+      path: '/api-test'
+      fullPath: '/api-test'
+      preLoaderRoute: typeof ApiTestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth': {
+      id: '/auth'
+      path: '/auth'
+      fullPath: '/auth'
+      preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/extract': {
+      id: '/extract'
+      path: '/extract'
+      fullPath: '/extract'
+      preLoaderRoute: typeof ExtractRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/upload': {
+      id: '/upload'
+      path: '/upload'
+      fullPath: '/upload'
+      preLoaderRoute: typeof UploadRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/admin': {
@@ -205,18 +205,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAdminRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/api/v1/invoices': {
-      id: '/api/v1/invoices'
-      path: '/api/v1/invoices'
-      fullPath: '/api/v1/invoices'
-      preLoaderRoute: typeof ApiV1InvoicesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/api/v1/extract': {
       id: '/api/v1/extract'
       path: '/api/v1/extract'
       fullPath: '/api/v1/extract'
       preLoaderRoute: typeof ApiV1ExtractRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v1/invoices': {
+      id: '/api/v1/invoices'
+      path: '/api/v1/invoices'
+      fullPath: '/api/v1/invoices'
+      preLoaderRoute: typeof ApiV1InvoicesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/v1/usage/current': {
@@ -254,3 +254,13 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}

@@ -4,7 +4,7 @@
 //     componentTagger (dev-only), VITE_* env injection, @ path alias, React/TanStack dedupe,
 //     error logger plugins, and sandbox detection (port/host/strictPort).
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
-import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+import { defineConfig } from "@lovable.dev/vite-tanstack-config/dist/index.js";
 
 // When deploying outside the Lovable sandbox (e.g. Vercel), force nitro on with
 // the Vercel preset so server routes like /api/v1/extract are built. Inside the
