@@ -508,7 +508,7 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
 
-  let modelName = process.env.GROQ_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct";
+  let modelName = process.env.GROQ_MODEL || "llama-3.2-11b-vision-instruct";
 
   const content: Array<Record<string, unknown>> = [
     {
@@ -551,10 +551,17 @@ async function callGroqVision(images: string[], hint?: string): Promise<string> 
     const text = await res.text();
     lastErr = `Groq API error ${res.status}: ${text.slice(0, 500)}`;
 
-    if (res.status === 404 && modelName !== "llama-3.2-11b-vision-preview") {
-      console.warn(`[groq] Model ${modelName} returned 404, falling back to llama-3.2-11b-vision-preview`, { rid });
-      modelName = "llama-3.2-11b-vision-preview";
-      continue;
+    const isModelErr = res.status === 404 || text.includes("model_decommissioned") || text.includes("does not exist");
+    if (isModelErr) {
+      if (modelName !== "llama-3.2-90b-vision-instruct" && modelName !== "meta-llama/llama-4-scout-17b-16e-instruct") {
+        console.warn(`[groq] Model ${modelName} unavailable, falling back to llama-3.2-90b-vision-instruct`, { rid });
+        modelName = "llama-3.2-90b-vision-instruct";
+        continue;
+      } else if (modelName === "llama-3.2-90b-vision-instruct") {
+        console.warn(`[groq] Model ${modelName} unavailable, falling back to meta-llama/llama-4-scout-17b-16e-instruct`, { rid });
+        modelName = "meta-llama/llama-4-scout-17b-16e-instruct";
+        continue;
+      }
     }
 
     if (res.status !== 429 && res.status < 500) {
@@ -719,9 +726,10 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const geminiApiKey = process.env.VERTEX_AI_API_KEY || process.env.GEMINI_API_KEY;
   const projectId = process.env.GCP_PROJECT_ID;
   const location = process.env.GCP_LOCATION || "us-central1";
+  const hasServiceAccount = !!(process.env.GCP_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
-  if (!geminiApiKey && !projectId) {
-    throw new Error("Neither VERTEX_AI_API_KEY / GEMINI_API_KEY nor GCP_PROJECT_ID is configured");
+  if (!geminiApiKey && !projectId && !hasServiceAccount) {
+    throw new Error("Neither VERTEX_AI_API_KEY / GEMINI_API_KEY nor GCP_SERVICE_ACCOUNT_JSON is configured");
   }
 
   const parts: Array<Record<string, unknown>> = [
@@ -763,17 +771,20 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     ? "aiplatform.googleapis.com"
     : `${location}-aiplatform.googleapis.com`;
   let modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  let endpoint = geminiApiKey
-    ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
-    : `https://${host}/v1/projects/${encodeURIComponent(projectId!)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
+
+  // Prefer Service Account OAuth if configured; otherwise use API Key (Google AI Studio or Vertex Key)
+  const useServiceAccount = hasServiceAccount && projectId;
+  let endpoint = useServiceAccount
+    ? `https://${host}/v1/projects/${encodeURIComponent(projectId!)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`
+    : (geminiApiKey?.startsWith("AIza")
+        ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey!)}`
+        : `https://${host}/v1/projects/${encodeURIComponent(projectId || "default")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`);
+
   const rid = reqId();
   let lastErr = "";
 
-  // Reject oversized payloads up front. Cloudflare Workers can fail the
-  // outbound fetch with a bare "fetch failed" when the request body is very
-  // large, and a clear error is far more useful than a silent retry loop.
   const PAYLOAD_LIMIT_BYTES = 18 * 1024 * 1024; // ~18MB serialized JSON
-  console.log("[gemini] request", { rid, payload_bytes: body.length, mode: geminiApiKey ? "api_key" : "service_account", model: modelName });
+  console.log("[gemini] request", { rid, payload_bytes: body.length, mode: useServiceAccount ? "service_account" : "api_key", model: modelName });
   if (body.length > PAYLOAD_LIMIT_BYTES) {
     throw new Error(
       `Document too large for Gemini API (${(body.length / 1024 / 1024).toFixed(1)}MB payload, limit ~18MB). ` +
@@ -781,20 +792,24 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     );
   }
 
-  // Total retry budget capped at ~45s so a saturated DSQ doesn't leave the
-  // user staring at a spinner for minutes — they get a real error instead.
   const MAX_ATTEMPTS = 4;
   const MAX_TOTAL_WAIT_MS = 45_000;
   const MAX_SINGLE_WAIT_MS = 12_000;
   const startedAt = Date.now();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (!geminiApiKey) {
+    if (useServiceAccount) {
       try {
         const accessToken = await getVertexAccessToken();
         headers["Authorization"] = `Bearer ${accessToken}`;
       } catch (e) {
         throw new Error(`Vertex AI auth failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else if (geminiApiKey) {
+      if (geminiApiKey.startsWith("AIza")) {
+        headers["x-goog-api-key"] = geminiApiKey;
+      } else {
+        headers["Authorization"] = `Bearer ${geminiApiKey}`;
       }
     }
 
