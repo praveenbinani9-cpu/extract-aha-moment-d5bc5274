@@ -609,11 +609,20 @@ function b64urlEncode(input: ArrayBuffer | Uint8Array | string): string {
 }
 
 function pemToArrayBuffer(pem: string): ArrayBuffer {
-  const cleaned = pem
+  let cleaned = pem
     .replace(/-----BEGIN [^-]+-----/g, "")
     .replace(/-----END [^-]+-----/g, "")
-    .replace(/\\n/g, "")
-    .replace(/\s+/g, "");
+    .replace(/[^A-Za-z0-9+/]/g, "");
+
+  while (cleaned.length % 4 !== 0) {
+    cleaned += "=";
+  }
+
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(cleaned, "base64");
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  }
+
   const binary = atob(cleaned);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -638,8 +647,6 @@ async function getVertexAccessToken(): Promise<string> {
   }
   if (!rawJson) throw new Error("Neither GCP_SERVICE_ACCOUNT_JSON nor GOOGLE_APPLICATION_CREDENTIALS is configured");
 
-  // Accept either raw JSON or base64-encoded JSON. Also strip UTF-8 BOM and
-  // smart quotes that sneak in when the value is copied from a rich-text editor.
   const tryParse = (s: string): ServiceAccountKey | null => {
     try {
       return JSON.parse(s) as ServiceAccountKey;
@@ -649,7 +656,6 @@ async function getVertexAccessToken(): Promise<string> {
   };
 
   let cleaned = rawJson.trim().replace(/^\uFEFF/, "");
-  // Convert typographic quotes back to plain quotes (only if JSON parse fails on raw).
   const withStraightQuotes = cleaned
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'");
@@ -660,7 +666,7 @@ async function getVertexAccessToken(): Promise<string> {
   // Fallback: value may be base64-encoded JSON.
   if (!sa && /^[A-Za-z0-9+/=\s]+$/.test(cleaned) && cleaned.length > 100) {
     try {
-      const decoded = atob(cleaned.replace(/\s+/g, ""));
+      const decoded = atob(cleaned.replace(/[^A-Za-z0-9+/=]/g, ""));
       sa = tryParse(decoded);
     } catch {
       // ignore
@@ -691,20 +697,41 @@ async function getVertexAccessToken(): Promise<string> {
   };
 
   const signingInput = `${b64urlEncode(JSON.stringify(header))}.${b64urlEncode(JSON.stringify(payload))}`;
-  const keyBuffer = pemToArrayBuffer(sa.private_key);
-  const cryptoKey = await crypto.subtle.importKey(
-    "pkcs8",
-    keyBuffer,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    cryptoKey,
-    new TextEncoder().encode(signingInput),
-  );
-  const jwt = `${signingInput}.${b64urlEncode(signature)}`;
+  let jwt = "";
+
+function normalizePemKey(pem: string): string {
+  let cleaned = pem.trim();
+  cleaned = cleaned.replace(/\\n/g, "\n").replace(/\\r/g, "");
+  // Ensure header and footer have line breaks
+  cleaned = cleaned
+    .replace(/(-----BEGIN [^-]+-----)\s*/, "$1\n")
+    .replace(/\s*(-----END [^-]+-----)/, "\n$1");
+  return cleaned;
+}
+
+  try {
+    const nodeCrypto = await import("node:crypto");
+    const formattedPem = normalizePemKey(sa.private_key);
+    const signer = nodeCrypto.createSign("RSA-SHA256");
+    signer.update(signingInput);
+    jwt = `${signingInput}.${signer.sign(formattedPem, "base64url")}`;
+  } catch (err) {
+    console.error("[vertex] nodeCrypto sign error:", err);
+    const keyBuffer = pemToArrayBuffer(sa.private_key);
+    const cryptoKey = await crypto.subtle.importKey(
+      "pkcs8",
+      keyBuffer,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signature = await crypto.subtle.sign(
+      "RSASSA-PKCS1-v1_5",
+      cryptoKey,
+      new TextEncoder().encode(signingInput),
+    );
+    jwt = `${signingInput}.${b64urlEncode(signature)}`;
+  }
 
   const tokenRes = await fetch(tokenUri, {
     method: "POST",
@@ -772,9 +799,8 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     : `${location}-aiplatform.googleapis.com`;
   let modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-  // Prefer Service Account OAuth if configured; otherwise use API Key (Google AI Studio or Vertex Key)
-  const useServiceAccount = hasServiceAccount && projectId;
-  let endpoint = useServiceAccount
+  let activeMode: "service_account" | "api_key" = hasServiceAccount && projectId ? "service_account" : "api_key";
+  let endpoint = activeMode === "service_account"
     ? `https://${host}/v1/projects/${encodeURIComponent(projectId!)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`
     : (geminiApiKey?.startsWith("AIza")
         ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey!)}`
@@ -784,7 +810,7 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   let lastErr = "";
 
   const PAYLOAD_LIMIT_BYTES = 18 * 1024 * 1024; // ~18MB serialized JSON
-  console.log("[gemini] request", { rid, payload_bytes: body.length, mode: useServiceAccount ? "service_account" : "api_key", model: modelName });
+  console.log("[gemini] request", { rid, payload_bytes: body.length, mode: activeMode, model: modelName });
   if (body.length > PAYLOAD_LIMIT_BYTES) {
     throw new Error(
       `Document too large for Gemini API (${(body.length / 1024 / 1024).toFixed(1)}MB payload, limit ~18MB). ` +
@@ -798,12 +824,26 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   const startedAt = Date.now();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (useServiceAccount) {
+    if (activeMode === "service_account") {
       try {
         const accessToken = await getVertexAccessToken();
         headers["Authorization"] = `Bearer ${accessToken}`;
       } catch (e) {
-        throw new Error(`Vertex AI auth failed: ${e instanceof Error ? e.message : String(e)}`);
+        const saErr = e instanceof Error ? e.message : String(e);
+        if (geminiApiKey) {
+          console.warn("[gemini] Service account auth failed, switching to VERTEX_AI_API_KEY / GEMINI_API_KEY", { rid, error: saErr });
+          activeMode = "api_key";
+          endpoint = geminiApiKey.startsWith("AIza")
+            ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
+            : `https://${host}/v1/projects/${encodeURIComponent(projectId || "default")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
+          if (geminiApiKey.startsWith("AIza")) {
+            headers["x-goog-api-key"] = geminiApiKey;
+          } else {
+            headers["Authorization"] = `Bearer ${geminiApiKey}`;
+          }
+        } else {
+          throw new Error(`Vertex AI auth failed: ${saErr}`);
+        }
       }
     } else if (geminiApiKey) {
       if (geminiApiKey.startsWith("AIza")) {
