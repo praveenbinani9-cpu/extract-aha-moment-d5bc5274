@@ -770,10 +770,14 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   let modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
   let activeMode: "service_account" | "api_key" = hasServiceAccount && projectId ? "service_account" : "api_key";
+  // Auth goes in the x-goog-api-key header (set below, per attempt) — never
+  // also append ?key= to the URL. Google rejects requests carrying the same
+  // API key both ways with 401 OVERLOADED_CREDENTIALS ("Expected only one
+  // form of authentication").
   let endpoint = activeMode === "service_account"
     ? `https://${host}/v1/projects/${encodeURIComponent(projectId!)}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`
     : (geminiApiKey?.startsWith("AIza")
-        ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey!)}`
+        ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`
         : `https://${host}/v1/projects/${encodeURIComponent(projectId || "default")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`);
 
   const rid = reqId();
@@ -807,7 +811,7 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
           console.warn("[gemini] Service account auth failed, switching to VERTEX_AI_API_KEY / GEMINI_API_KEY", { rid, error: saErr });
           activeMode = "api_key";
           endpoint = geminiApiKey.startsWith("AIza")
-            ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
+            ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`
             : `https://${host}/v1/projects/${encodeURIComponent(projectId || "default")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
           if (geminiApiKey.startsWith("AIza")) {
             headers["x-goog-api-key"] = geminiApiKey;
@@ -880,8 +884,8 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
       if (nextModel) {
         console.warn(`[vertex] Model ${modelName} returned 404, falling back to ${nextModel}`, { rid });
         modelName = nextModel;
-        endpoint = geminiApiKey
-          ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
+        endpoint = activeMode === "api_key" && geminiApiKey?.startsWith("AIza")
+          ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent`
           : `https://${host}/v1/projects/${encodeURIComponent(projectId ?? "")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
         continue;
       }
