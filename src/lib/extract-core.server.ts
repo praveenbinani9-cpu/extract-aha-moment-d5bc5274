@@ -631,29 +631,66 @@ function normalizePemKey(pem: string): string {
   return cleaned;
 }
 
-  try {
-    const nodeCrypto = await import("node:crypto");
-    const formattedPem = normalizePemKey(sa.private_key);
-    const signer = nodeCrypto.createSign("RSA-SHA256");
-    signer.update(signingInput);
-    jwt = `${signingInput}.${signer.sign(formattedPem, "base64url")}`;
-  } catch (err) {
-    console.error("[vertex] nodeCrypto sign error:", err);
-    const keyBuffer = pemToArrayBuffer(sa.private_key);
-    const cryptoKey = await crypto.subtle.importKey(
-      "pkcs8",
-      keyBuffer,
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      false,
-      ["sign"],
-    );
-    const signature = await crypto.subtle.sign(
-      "RSASSA-PKCS1-v1_5",
-      cryptoKey,
-      new TextEncoder().encode(signingInput),
-    );
-    jwt = `${signingInput}.${b64urlEncode(signature)}`;
+  // Different Node/OpenSSL builds (e.g. local macOS Node vs. a serverless
+  // platform's Linux Node) can disagree on parsing the exact same PEM key —
+  // one build's DER decoder throws `DECODER routines::unsupported` on a key
+  // another build reads fine. Try three independent signing paths, each
+  // exercising a different internal decode route, before giving up.
+  const nodeCrypto = await import("node:crypto");
+  const formattedPem = normalizePemKey(sa.private_key);
+  const signAttempts: Array<{ name: string; run: () => Buffer | Promise<Buffer> }> = [
+    {
+      name: "node:crypto Sign.sign(pem)",
+      run: () => {
+        const signer = nodeCrypto.createSign("RSA-SHA256");
+        signer.update(signingInput);
+        return signer.sign(formattedPem);
+      },
+    },
+    {
+      name: "node:crypto createPrivateKey+sign",
+      run: () => {
+        const keyObject = nodeCrypto.createPrivateKey(formattedPem);
+        return nodeCrypto.sign("RSA-SHA256", Buffer.from(signingInput), keyObject);
+      },
+    },
+    {
+      name: "WebCrypto subtle.importKey+sign",
+      run: async () => {
+        const keyBuffer = pemToArrayBuffer(sa.private_key);
+        const cryptoKey = await crypto.subtle.importKey(
+          "pkcs8",
+          keyBuffer,
+          { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+          false,
+          ["sign"],
+        );
+        const signature = await crypto.subtle.sign(
+          "RSASSA-PKCS1-v1_5",
+          cryptoKey,
+          new TextEncoder().encode(signingInput),
+        );
+        return Buffer.from(signature);
+      },
+    },
+  ];
+
+  let signature: Buffer | null = null;
+  const signErrors: string[] = [];
+  for (const attempt of signAttempts) {
+    try {
+      signature = await attempt.run();
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[vertex] JWT signing failed via ${attempt.name}:`, msg);
+      signErrors.push(`${attempt.name}: ${msg}`);
+    }
   }
+  if (!signature) {
+    throw new Error(`All JWT signing methods failed for GCP_SERVICE_ACCOUNT_JSON — ${signErrors.join(" | ")}`);
+  }
+  jwt = `${signingInput}.${b64urlEncode(signature)}`;
 
   const tokenRes = await fetch(tokenUri, {
     method: "POST",

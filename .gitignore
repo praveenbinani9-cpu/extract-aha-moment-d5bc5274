@@ -24,6 +24,7 @@ dist-ssr
 .env
 .env.*
 !.env.example
+gcp-sa-for-vercel.txt
 
 # Editor directories and files
 .vscode/*
