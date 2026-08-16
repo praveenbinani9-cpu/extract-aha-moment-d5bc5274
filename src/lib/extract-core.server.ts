@@ -637,6 +637,7 @@ function normalizePemKey(pem: string): string {
   // another build reads fine. Try three independent signing paths, each
   // exercising a different internal decode route, before giving up.
   const nodeCrypto = await import("node:crypto");
+  console.log("[vertex] runtime", { node_version: process.version, openssl_version: process.versions.openssl });
   const formattedPem = normalizePemKey(sa.private_key);
   const signAttempts: Array<{ name: string; run: () => Buffer | Promise<Buffer> }> = [
     {
@@ -1019,6 +1020,16 @@ export type ExtractCoreOutput = ExtractCoreResult & {
 export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreOutput> {
   const t0 = Date.now();
   const rid = reqId();
+  // Vercel injects the deployed commit SHA automatically — log it so we can
+  // confirm exactly which build is actually executing a given request,
+  // independent of what the dashboard UI claims is "Production".
+  console.log("[extract] deployment", {
+    rid,
+    vercel_env: process.env.VERCEL_ENV ?? null,
+    vercel_git_commit_sha: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
+    vercel_git_commit_ref: process.env.VERCEL_GIT_COMMIT_REF ?? null,
+    vercel_url: process.env.VERCEL_URL ?? null,
+  });
 
   const tCompress = Date.now();
   const compressed = await compressImages(images);
