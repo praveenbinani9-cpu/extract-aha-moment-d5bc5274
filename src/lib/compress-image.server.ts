@@ -1,6 +1,8 @@
 // Server-only image compression before LLM calls.
-// Uses Web APIs (createImageBitmap + OffscreenCanvas) for Cloudflare Workers
-// and Vercel Node compatibility — no native image deps.
+// Prefers Web APIs (createImageBitmap + OffscreenCanvas) when available
+// (Cloudflare Workers). Node runtimes — local `vite dev` and the Vercel
+// deployment this app actually targets (see vite.config.ts) — don't implement
+// those, so we fall back to `sharp` there instead of silently no-op'ing.
 
 import { isPdfDataUri } from "./pdf-pages.server";
 
@@ -83,48 +85,77 @@ export async function compressImageDataUri(
   const limit = opts?.maxDim ?? maxDim();
   const quality = opts?.quality ?? jpegQuality();
   const rawBytes = base64ByteLength(b64);
+  const hasWebImageApis =
+    typeof createImageBitmap !== "undefined" && typeof OffscreenCanvas !== "undefined";
 
   try {
     const bytes = decodeBase64(b64);
-    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mime });
-    const bitmap = await createImageBitmap(blob);
 
-    const needsResize = bitmap.width > limit || bitmap.height > limit;
+    if (hasWebImageApis) {
+      const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mime });
+      const bitmap = await createImageBitmap(blob);
+
+      const needsResize = bitmap.width > limit || bitmap.height > limit;
+      const isSmallJpeg = mime === "image/jpeg" && !needsResize && rawBytes < SMALL_JPEG_BYTES;
+
+      if (isSmallJpeg) {
+        bitmap.close();
+        return { dataUri, compressed: false, beforeBytes, afterBytes: beforeBytes };
+      }
+
+      let width = bitmap.width;
+      let height = bitmap.height;
+      if (needsResize) {
+        const ratio = Math.min(limit / width, limit / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        bitmap.close();
+        return { dataUri, compressed: false, beforeBytes, afterBytes: beforeBytes };
+      }
+
+      ctx.drawImage(bitmap, 0, 0, width, height);
+      bitmap.close();
+
+      const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+      const outBytes = new Uint8Array(await jpegBlob.arrayBuffer());
+      const outB64 = encodeBase64(outBytes);
+
+      return {
+        dataUri: `data:image/jpeg;base64,${outB64}`,
+        compressed: true,
+        beforeBytes: rawBytes,
+        afterBytes: outBytes.byteLength,
+      };
+    }
+
+    // Node runtime (local `vite dev`, Vercel) — no createImageBitmap/OffscreenCanvas.
+    const sharp = (await import("sharp")).default;
+    const image = sharp(Buffer.from(bytes));
+    const metadata = await image.metadata();
+    const width = metadata.width ?? 0;
+    const height = metadata.height ?? 0;
+    const needsResize = width > limit || height > limit;
     const isSmallJpeg = mime === "image/jpeg" && !needsResize && rawBytes < SMALL_JPEG_BYTES;
 
     if (isSmallJpeg) {
-      bitmap.close();
       return { dataUri, compressed: false, beforeBytes, afterBytes: beforeBytes };
     }
 
-    let width = bitmap.width;
-    let height = bitmap.height;
-    if (needsResize) {
-      const ratio = Math.min(limit / width, limit / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-
-    const canvas = new OffscreenCanvas(width, height);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      bitmap.close();
-      return { dataUri, compressed: false, beforeBytes, afterBytes: beforeBytes };
-    }
-
-    ctx.drawImage(bitmap, 0, 0, width, height);
-    bitmap.close();
-
-    const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality });
-    const outBytes = new Uint8Array(await jpegBlob.arrayBuffer());
-    const outB64 = encodeBase64(outBytes);
-    const outUri = `data:image/jpeg;base64,${outB64}`;
+    const pipeline = needsResize
+      ? image.resize({ width: limit, height: limit, fit: "inside", withoutEnlargement: true })
+      : image;
+    const outBuffer = await pipeline.jpeg({ quality: Math.round(quality * 100) }).toBuffer();
 
     return {
-      dataUri: outUri,
+      dataUri: `data:image/jpeg;base64,${outBuffer.toString("base64")}`,
       compressed: true,
       beforeBytes: rawBytes,
-      afterBytes: outBytes.byteLength,
+      afterBytes: outBuffer.byteLength,
     };
   } catch (err) {
     console.warn("[compress] failed, using original", {

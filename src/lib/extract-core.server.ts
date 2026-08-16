@@ -504,84 +504,6 @@ function reqId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-async function callGroqVision(images: string[], hint?: string): Promise<string> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
-
-  let modelName = process.env.GROQ_MODEL || "llama-3.2-11b-vision-instruct";
-
-  const content: Array<Record<string, unknown>> = [
-    {
-      type: "text",
-      text: `Extract structured data from this document.${hint ? " Hint: " + hint : ""} Return JSON only.`,
-    },
-    ...images.map((url) => ({
-      type: "image_url",
-      image_url: { url: normalizeImageUrl(url) },
-    })),
-  ];
-
-  const rid = reqId();
-  let lastErr = "";
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const body = JSON.stringify({
-      model: modelName,
-      temperature: 0,
-      top_p: 1,
-      seed: 7,
-      max_tokens: 8192,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content },
-      ],
-    });
-
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body,
-    });
-
-    if (res.ok) {
-      const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-      return json.choices?.[0]?.message?.content ?? "{}";
-    }
-
-    const text = await res.text();
-    lastErr = `Groq API error ${res.status}: ${text.slice(0, 500)}`;
-
-    const isModelErr = res.status === 404 || text.includes("model_decommissioned") || text.includes("does not exist");
-    if (isModelErr) {
-      if (modelName !== "llama-3.2-90b-vision-instruct" && modelName !== "meta-llama/llama-4-scout-17b-16e-instruct") {
-        console.warn(`[groq] Model ${modelName} unavailable, falling back to llama-3.2-90b-vision-instruct`, { rid });
-        modelName = "llama-3.2-90b-vision-instruct";
-        continue;
-      } else if (modelName === "llama-3.2-90b-vision-instruct") {
-        console.warn(`[groq] Model ${modelName} unavailable, falling back to meta-llama/llama-4-scout-17b-16e-instruct`, { rid });
-        modelName = "meta-llama/llama-4-scout-17b-16e-instruct";
-        continue;
-      }
-    }
-
-    if (res.status !== 429 && res.status < 500) {
-      console.error("[groq]", { rid, attempt, status: res.status, error: lastErr });
-      break;
-    }
-
-    let waitMs = 0;
-    const retryAfter = res.headers.get("retry-after");
-    if (retryAfter) waitMs = Math.ceil(parseFloat(retryAfter) * 1000);
-    const m = text.match(/try again in ([\d.]+)s/i);
-    if (m) waitMs = Math.max(waitMs, Math.ceil(parseFloat(m[1]) * 1000));
-    if (!waitMs) waitMs = 2000 * (attempt + 1);
-    waitMs = Math.min(waitMs + 500, 30000);
-    console.warn("[groq] retry", { rid, attempt, status: res.status, wait_ms: waitMs });
-    await new Promise((r) => setTimeout(r, waitMs));
-  }
-  throw new Error(lastErr || "Groq API failed");
-}
-
 // ============================================================================
 // Vertex AI (Google Cloud) Gemini call
 // ============================================================================
@@ -778,7 +700,11 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     const generationConfig: Record<string, unknown> = {
       temperature: 0,
       topP: 1,
-      maxOutputTokens: 2048,
+      // The full document schema (seller/buyer/line_items/totals/bank/transport/etc.,
+      // all emitted even when null) easily exceeds a couple thousand tokens for a
+      // real invoice. 2048 was truncating output mid-JSON, which parseJsonLoose
+      // then silently swallowed into `{}`. Match Groq's max_tokens budget.
+      maxOutputTokens: 8192,
       responseMimeType: "application/json",
     };
     if (withSchema) {
@@ -791,13 +717,19 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
     });
   }
 
-  let useResponseSchema = true;
+  // VERTEX_EXTRACTION_SCHEMA's top-level `oneOf` (single document vs. { documents: [...] })
+  // combined with its deeply nested required objects triggers a known Gemini/Vertex
+  // structured-output failure mode: the model fills flat top-level fields but silently
+  // nulls out nested objects/arrays it should have populated (google-cloud-java#11782).
+  // SYSTEM_PROMPT already spells out the exact JSON contract in full, so skip the
+  // schema by default — same strategy the Groq call already uses successfully.
+  let useResponseSchema = process.env.VERTEX_USE_RESPONSE_SCHEMA === "true";
   let body = buildVertexBody(useResponseSchema);
 
   const host = location === "global"
     ? "aiplatform.googleapis.com"
     : `${location}-aiplatform.googleapis.com`;
-  let modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  let modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
   let activeMode: "service_account" | "api_key" = hasServiceAccount && projectId ? "service_account" : "api_key";
   let endpoint = activeMode === "service_account"
@@ -819,7 +751,10 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
   }
 
   const MAX_ATTEMPTS = 4;
-  const MAX_TOTAL_WAIT_MS = 45_000;
+  // Raised alongside maxOutputTokens (2048→8192) and dropping responseSchema:
+  // both make Gemini generate more/longer before it settles, so successful
+  // calls now regularly land in the 15-25s range instead of ~10s.
+  const MAX_TOTAL_WAIT_MS = 100_000;
   const MAX_SINGLE_WAIT_MS = 12_000;
   const startedAt = Date.now();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -860,8 +795,10 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
         headers,
         body,
         // Abort before Cloudflare's 524 gateway timeout (~100s) so we
-        // surface a real error and can retry within budget.
-        signal: AbortSignal.timeout(25_000),
+        // surface a real error and can retry within budget. 45s (was 25s) —
+        // observed successful calls now take 15-25s with the larger output
+        // budget, and 25s was aborting good-faith in-flight requests.
+        signal: AbortSignal.timeout(45_000),
       });
     } catch (e) {
       // Network-level failure (DNS, TLS, ECONNRESET, request-body too large
@@ -878,26 +815,38 @@ async function callGeminiDirect(images: string[], hint?: string): Promise<string
 
     if (res.ok) {
       const json = (await res.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
       };
       const text = json.candidates?.[0]?.content?.parts
         ?.map((p) => p.text ?? "")
         .join("") ?? "";
-      console.log("[vertex] response", { rid, attempt, elapsed_ms: Date.now() - startedAt, payload_bytes: body.length, model: modelName });
+      const finishReason = json.candidates?.[0]?.finishReason;
+      if (finishReason === "MAX_TOKENS") {
+        console.error("[vertex] response truncated at maxOutputTokens — increase the budget", {
+          rid, attempt, text_len: text.length, model: modelName,
+        });
+      }
+      console.log("[vertex] response", { rid, attempt, elapsed_ms: Date.now() - startedAt, payload_bytes: body.length, model: modelName, finishReason });
       return text || "{}";
     }
 
     const text = await res.text();
     lastErr = `Vertex AI error ${res.status}: ${text.slice(0, 500)}`;
 
-    // Model 404 — fallback to gemini-2.5-flash if model is not provisioned in project
-    if (res.status === 404 && modelName !== "gemini-2.5-flash") {
-      console.warn(`[vertex] Model ${modelName} returned 404, falling back to gemini-2.5-flash`, { rid });
-      modelName = "gemini-2.5-flash";
-      endpoint = geminiApiKey
-        ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
-        : `https://${host}/v1/projects/${encodeURIComponent(projectId ?? "")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
-      continue;
+    // Model 404 — cascade through decreasingly recent Flash models until one
+    // is provisioned in this project: 3.6 → 3.5 → 2.5.
+    if (res.status === 404) {
+      const nextModel = modelName === "gemini-3.6-flash" ? "gemini-3.5-flash"
+        : modelName === "gemini-3.5-flash" ? "gemini-2.5-flash"
+        : null;
+      if (nextModel) {
+        console.warn(`[vertex] Model ${modelName} returned 404, falling back to ${nextModel}`, { rid });
+        modelName = nextModel;
+        endpoint = geminiApiKey
+          ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`
+          : `https://${host}/v1/projects/${encodeURIComponent(projectId ?? "")}/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(modelName)}:generateContent`;
+        continue;
+      }
     }
     // Auth issue — bust the token cache and retry once immediately.
     if (res.status === 401 || res.status === 403) {
@@ -1023,147 +972,12 @@ function getOverallConfidence(parsed: unknown): number {
 }
 
 const CONFIDENCE_THRESHOLD = 0.95;
-const TIE_MARGIN = 0.02;
-
-const CRITICAL_FIELDS = [
-  { key: "invoice_number", get: (d: ExtractedObject) => d.document_number, pfc: "invoice_number" },
-  { key: "invoice_date", get: (d: ExtractedObject) => d.document_date, pfc: "invoice_date" },
-  { key: "seller_gstin", get: (d: ExtractedObject) => toObject(d.seller)?.gstin, pfc: "seller_gstin" },
-  { key: "buyer_gstin", get: (d: ExtractedObject) => toObject(d.buyer)?.gstin, pfc: "buyer_gstin" },
-  { key: "grand_total", get: (d: ExtractedObject) => toObject(d.totals)?.grand_total, pfc: "grand_total" },
-] as const;
-
-function normStr(v: unknown): string | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === "string") return v.trim().toUpperCase().replace(/\s+/g, "");
-  if (typeof v === "number") return String(v);
-  return null;
-}
-
-function fieldsAgree(key: string, a: unknown, b: unknown): boolean {
-  if (a === null || a === undefined || b === null || b === undefined) return false;
-  if (key === "grand_total") {
-    const na = toNumber(a);
-    const nb = toNumber(b);
-    if (na === null || nb === null) return false;
-    return Math.abs(na - nb) < 0.01;
-  }
-  const sa = normStr(a);
-  const sb = normStr(b);
-  return sa !== null && sb !== null && sa === sb;
-}
-
-// Cross-check critical fields between winning and losing cascade results.
-// Reuses in-memory results — makes NO additional API calls.
-function crossCheckCritical(
-  winner: unknown,
-  loser: unknown,
-  winnerProvider: "groq" | "gemini",
-  loserProvider: "groq" | "gemini",
-  rid: string,
-): void {
-  const w = toObject(winner);
-  const l = toObject(loser);
-  if (!w || !l) return;
-  // Skip multi-document envelopes — ambiguous which doc pairs to which.
-  if (Array.isArray(w.documents) || Array.isArray(l.documents)) return;
-
-  const pfc = toObject(w.per_field_confidence) ?? {};
-  const validation = toObject(w.validation) ?? {};
-  const warnings: string[] = Array.isArray(validation.warnings) ? (validation.warnings as string[]) : [];
-
-  for (const f of CRITICAL_FIELDS) {
-    const wv = f.get(w);
-    const lv = f.get(l);
-    if ((wv === null || wv === undefined) && (lv === null || lv === undefined)) continue;
-    const current = toNumber(pfc[f.pfc]);
-    if (fieldsAgree(f.key, wv, lv)) {
-      const boosted = current === null ? 0.99 : Math.min(0.99, current + 0.05);
-      pfc[f.pfc] = Number(boosted.toFixed(2));
-    } else {
-      const capped = current === null ? 0.7 : Math.min(current, 0.7);
-      pfc[f.pfc] = Number(capped.toFixed(2));
-      const msg = `Critical field "${f.key}" disagreed between providers — confidence lowered`;
-      if (!warnings.includes(msg)) warnings.push(msg);
-      console.warn("[cross-check] disagreement", {
-        rid,
-        field: f.key,
-        kept_provider: winnerProvider,
-        kept_value: wv ?? null,
-        other_provider: loserProvider,
-        other_value: lv ?? null,
-      });
-    }
-  }
-
-  w.per_field_confidence = pfc;
-  validation.warnings = warnings;
-  w.validation = validation;
-
-  // Recompute overall_confidence from the updated per_field_confidence.
-  const vals = Object.values(pfc).map((v) => toNumber(v)).filter((v): v is number => v !== null);
-  if (vals.length > 0) {
-    w.overall_confidence = Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2));
-  }
-}
 
 export type ExtractCoreOutput = ExtractCoreResult & {
-  provider_used: "groq" | "gemini";
+  provider_used: "gemini";
   overall_confidence: number;
   meets_confidence_threshold: boolean;
 };
-
-
-// Bounded-concurrency map: run `worker` over `items` with up to `limit` in-flight.
-// Preserves input order and never fails-fast — each slot picks the next index.
-async function pMap<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  const width = Math.max(1, Math.min(limit, items.length));
-  let cursor = 0;
-  const runners = Array.from({ length: width }, async () => {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) return;
-      results[i] = await worker(items[i], i);
-    }
-  });
-  await Promise.all(runners);
-  return results;
-}
-
-async function runGroqOnImages(images: string[], hint?: string): Promise<unknown> {
-  if (images.length > 1) {
-    const rid = reqId();
-    const limit = Math.max(1, parseInt(process.env.EXTRACT_CONCURRENCY ?? "5", 10) || 5);
-    const t0 = Date.now();
-    console.log("[groq] parallel start", { rid, pages: images.length, concurrency: limit });
-    const perImage = await pMap(images, limit, async (img, i) => {
-      const started = Date.now();
-      try {
-        const raw = await callGroqVision([img], hint);
-        const out = normalizeResponse(parseJsonLoose(raw));
-        console.log("[groq] page done", { rid, page: i + 1, ms: Date.now() - started });
-        return out;
-      } catch (err) {
-        console.error("[groq] page failed", { rid, page: i + 1, ms: Date.now() - started, error: err instanceof Error ? err.message : String(err) });
-        throw err;
-      }
-    });
-    console.log("[groq] parallel done", { rid, pages: images.length, total_ms: Date.now() - t0 });
-    const docs: unknown[] = [];
-    for (const r of perImage) {
-      const o = toObject(r);
-      if (o && Array.isArray(o.documents)) docs.push(...o.documents);
-      else if (o) docs.push(o);
-    }
-    return docs.length === 1 ? docs[0] : { documents: docs };
-  }
-  return normalizeResponse(parseJsonLoose(await callGroqVision(images, hint)));
-}
 
 export async function extractCore(images: string[], hint?: string): Promise<ExtractCoreOutput> {
   const t0 = Date.now();
@@ -1188,102 +1002,22 @@ export async function extractCore(images: string[], hint?: string): Promise<Extr
   });
 
   let parsed: unknown;
-  let provider_used: "groq" | "gemini" = "gemini";
+  const provider_used = "gemini" as const;
   let overall_confidence = 0;
   const tProviderStart = Date.now();
 
-  if (hasPdf) {
-    try {
-      parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
-      provider_used = "gemini";
-      overall_confidence = getOverallConfidence(parsed);
-      console.log("[extract]", { rid, provider_used, primary: "gemini", hasPdf, overall_confidence });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[extract] PDF extraction failed", { rid, error: msg });
-      throw new Error(`PDF extraction failed: ${msg}. Please check VERTEX_AI_API_KEY or GCP_PROJECT_ID.`);
-    }
-  } else {
-    // Images: Groq primary pass with Gemini cascade fallback
-    let groqParsed: unknown | null = null;
-    let groqConfidence = 0;
-    let groqErr: unknown = null;
-
-    try {
-      groqParsed = await runGroqOnImages(images, hint);
-      groqConfidence = getOverallConfidence(groqParsed);
-    } catch (err) {
-      groqErr = err;
-      console.error("[extract] Groq hard failure — falling back to Gemini", {
-        rid,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    if (groqErr) {
-      try {
-        parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
-        provider_used = "gemini";
-        overall_confidence = getOverallConfidence(parsed);
-        console.log("[extract]", { rid, provider_used, fallback: true, reason: "groq_hard_failure", overall_confidence });
-      } catch (gErr) {
-        throw new Error(
-          "Both providers failed. Groq: " +
-            (groqErr instanceof Error ? groqErr.message : String(groqErr)) +
-            " | Gemini: " +
-            (gErr instanceof Error ? gErr.message : String(gErr)),
-        );
-      }
-    } else if (groqConfidence >= CONFIDENCE_THRESHOLD) {
-      parsed = groqParsed;
-      provider_used = "groq";
-      overall_confidence = groqConfidence;
-      console.log("[extract]", { rid, provider_used, fallback: false, overall_confidence });
-    } else {
-      console.log("[extract] cascade to Gemini due to low Groq confidence", {
-        rid,
-        groq_confidence: groqConfidence,
-        threshold: CONFIDENCE_THRESHOLD,
-      });
-      try {
-        const gemParsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
-        const gemConfidence = getOverallConfidence(gemParsed);
-        let loserParsed: unknown;
-        let loserProvider: "groq" | "gemini";
-        if (gemConfidence > groqConfidence + TIE_MARGIN) {
-          parsed = gemParsed;
-          provider_used = "gemini";
-          overall_confidence = gemConfidence;
-          loserParsed = groqParsed;
-          loserProvider = "groq";
-        } else {
-          parsed = groqParsed;
-          provider_used = "groq";
-          overall_confidence = groqConfidence;
-          loserParsed = gemParsed;
-          loserProvider = "gemini";
-        }
-        crossCheckCritical(parsed, loserParsed, provider_used, loserProvider, rid);
-        overall_confidence = getOverallConfidence(parsed);
-        console.log("[extract] cascade result", {
-          rid,
-          provider_used,
-          fallback: provider_used === "gemini",
-          reason: "low_groq_confidence",
-          groq_confidence: groqConfidence,
-          gemini_confidence: gemConfidence,
-          overall_confidence_after_crosscheck: overall_confidence,
-        });
-      } catch (gErr) {
-        console.error("[extract] Gemini cascade failed; keeping Groq result", {
-          rid,
-          error: gErr instanceof Error ? gErr.message : String(gErr),
-        });
-        parsed = groqParsed;
-        provider_used = "groq";
-        overall_confidence = groqConfidence;
-      }
-    }
+  // Gemini/Vertex handles both PDFs and images in a single call (one inlineData
+  // part per page). Groq was dropped as an image-only fast path: its account's
+  // 8000 TPM ceiling can't fit this system prompt + an image + a full invoice's
+  // worth of output tokens, so every call failed with a 413 regardless of tier.
+  try {
+    parsed = normalizeResponse(parseJsonLoose(await callGeminiDirect(images, hint)));
+    overall_confidence = getOverallConfidence(parsed);
+    console.log("[extract]", { rid, provider_used, hasPdf, overall_confidence });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[extract] extraction failed", { rid, error: msg });
+    throw new Error(`Extraction failed: ${msg}. Please check VERTEX_AI_API_KEY or GCP_PROJECT_ID.`);
   }
 
   const providerMs = Date.now() - tProviderStart;
